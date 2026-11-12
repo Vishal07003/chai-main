@@ -43,6 +43,7 @@ INSTALLED_APPS = [
     'orders.apps.OrdersConfig',
     'deliveries.apps.DeliveriesConfig',
     'billing.apps.BillingConfig',
+    'notifications.apps.NotificationsConfig',
 ]
 
 MIDDLEWARE = [
@@ -136,6 +137,9 @@ SIMPLE_JWT = {
     'SIGNING_KEY': jwt_signing_key,
     'AUTH_HEADER_TYPES': ('Bearer',),
 }
+
+# Firebase Cloud Messaging Credentials Path
+FIREBASE_CREDENTIALS_PATH = os.getenv('FIREBASE_CREDENTIALS_PATH', str(BASE_DIR / 'firebase-service-account.json'))
 
 # CORS Configuration
 if DEBUG:

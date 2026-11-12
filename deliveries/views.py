@@ -60,7 +60,13 @@ class DeliveryViewSet(viewsets.ModelViewSet):
         elif new_status == 'delivered' and not instance.delivered_time:
             extra_fields['delivered_time'] = timezone.now()
 
-        serializer.save(**extra_fields)
+        previous_driver = instance.driver
+        updated_delivery = serializer.save(**extra_fields)
+
+        # Trigger FCM notification when driver is assigned or changed
+        if updated_delivery.driver and updated_delivery.driver != previous_driver:
+            from notifications.services import NotificationService
+            NotificationService.on_delivery_assigned(updated_delivery)
 
     def perform_destroy(self, instance):
         user = self.request.user
