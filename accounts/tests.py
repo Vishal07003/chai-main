@@ -91,3 +91,52 @@ class AccountsTests(TestCase):
         self.assertEqual(patch_res.status_code, status.HTTP_200_OK)
         self.customer_profile.refresh_from_db()
         self.assertEqual(self.customer_profile.role, 'customer')
+    def test_otp_send_and_verify_existing_owner(self):
+        """OTP login for existing owner preserves owner role and issues JWT."""
+        # 1. Send OTP
+        send_res = self.client.post('/api/v1/accounts/otp/send/', {'phone': '9876543210'}, format='json')
+        self.assertEqual(send_res.status_code, status.HTTP_200_OK)
+        self.assertTrue(send_res.data['success'])
+        self.assertTrue(send_res.data['user_exists'])
+        session_id = send_res.data['session_id']
+
+        # 2. Verify OTP with valid mock code
+        verify_res = self.client.post('/api/v1/accounts/otp/verify/', {
+            'phone': '9876543210',
+            'session_id': session_id,
+            'otp': '123456',
+        }, format='json')
+        self.assertEqual(verify_res.status_code, status.HTTP_200_OK)
+        self.assertIn('tokens', verify_res.data)
+        self.assertEqual(verify_res.data['user']['username'], 'testowner')
+        self.assertEqual(verify_res.data['user']['profile']['role'], 'owner')
+
+    def test_otp_send_and_verify_new_user_gets_customer_role(self):
+        """Public OTP registration creates a customer account and prevents owner escalation."""
+        # 1. Send OTP to new mobile
+        send_res = self.client.post('/api/v1/accounts/otp/send/', {'phone': '9123456789'}, format='json')
+        self.assertEqual(send_res.status_code, status.HTTP_200_OK)
+        self.assertFalse(send_res.data['user_exists'])
+        session_id = send_res.data['session_id']
+
+        # 2. Verify OTP
+        verify_res = self.client.post('/api/v1/accounts/otp/verify/', {
+            'phone': '9123456789',
+            'session_id': session_id,
+            'otp': '123456',
+        }, format='json')
+        self.assertEqual(verify_res.status_code, status.HTTP_200_OK)
+        self.assertIn('tokens', verify_res.data)
+        self.assertEqual(verify_res.data['user']['profile']['role'], 'customer')
+
+    def test_otp_verify_invalid_code_fails(self):
+        send_res = self.client.post('/api/v1/accounts/otp/send/', {'phone': '9876543210'}, format='json')
+        session_id = send_res.data['session_id']
+
+        verify_res = self.client.post('/api/v1/accounts/otp/verify/', {
+            'phone': '9876543210',
+            'session_id': session_id,
+            'otp': '000000',
+        }, format='json')
+        self.assertEqual(verify_res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('error', verify_res.data)
