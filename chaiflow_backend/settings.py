@@ -12,7 +12,6 @@ load_dotenv(BASE_DIR / '.env')
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.getenv('DJANGO_SECRET_KEY')
 if not SECRET_KEY:
-    # Safe fallback strictly for initial local dev bootstrap; raise error in production
     if os.getenv('DJANGO_DEBUG', 'True') == 'False':
         raise RuntimeError("DJANGO_SECRET_KEY environment variable is not set!")
     SECRET_KEY = 'django-insecure-dev-only-secret-key-change-in-production'
@@ -43,6 +42,7 @@ INSTALLED_APPS = [
     'products.apps.ProductsConfig',
     'orders.apps.OrdersConfig',
     'deliveries.apps.DeliveriesConfig',
+    'billing.apps.BillingConfig',
 ]
 
 MIDDLEWARE = [
@@ -76,7 +76,6 @@ TEMPLATES = [
 WSGI_APPLICATION = 'chaiflow_backend.wsgi.application'
 
 # Database
-# Default to SQLite for local development; can easily switch to PostgreSQL via env
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
@@ -139,8 +138,6 @@ SIMPLE_JWT = {
 }
 
 # CORS Configuration
-# In DEBUG mode, allow all origins for mobile emulators & LAN development.
-# In production (DEBUG=False), allow explicitly defined origins.
 if DEBUG:
     CORS_ALLOW_ALL_ORIGINS = True
 else:
