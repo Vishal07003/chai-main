@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Delivery
+from .models import Delivery, DeliveryPartner, DeliverySchedule
 from orders.serializers import OrderSerializer
 from django.contrib.auth.models import User
 
@@ -27,3 +27,24 @@ class DeliverySerializer(serializers.ModelSerializer):
         if value is not None and hasattr(value, 'profile') and value.profile.role != 'delivery':
             raise serializers.ValidationError("Assigned user must have the 'delivery' role.")
         return value
+
+class DeliveryPartnerSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DeliveryPartner
+        fields = [
+            'id', 'user', 'name', 'phone', 'emergency_phone',
+            'license_number', 'vehicle_type', 'vehicle_model',
+            'number_plate', 'location', 'status', 'avatar_url',
+            'created_at',
+        ]
+        read_only_fields = ['id', 'created_at']
+
+class DeliveryScheduleSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DeliverySchedule
+        fields = [
+            'id', 'time_slot', 'title', 'customer_name', 'address',
+            'partner', 'partner_name', 'status', 'items_count',
+            'scheduled_date', 'created_at',
+        ]
+        read_only_fields = ['id', 'scheduled_date', 'created_at']

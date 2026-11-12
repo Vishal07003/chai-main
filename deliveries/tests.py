@@ -81,3 +81,32 @@ class DeliveriesTests(TestCase):
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.delivery.refresh_from_db()
         self.assertEqual(self.delivery.driver, self.driver2)
+    def test_delivery_partner_and_schedule_crud(self):
+        """Owner can register delivery fleet partners and route schedules."""
+        self.client.force_authenticate(user=self.owner)
+
+        # 1. Create delivery partner
+        partner_res = self.client.post('/api/v1/deliveries/partners/', {
+            'name': 'Ramesh Patel',
+            'phone': '9876500001',
+            'vehicle_type': 'Scooter',
+            'vehicle_model': 'Hero Electric',
+            'number_plate': 'KA-01-EA-9920',
+            'status': 'READY',
+        }, format='json')
+        self.assertEqual(partner_res.status_code, status.HTTP_201_CREATED)
+        partner_id = partner_res.data['id']
+
+        # 2. Create route schedule
+        schedule_res = self.client.post('/api/v1/deliveries/schedules/', {
+            'time_slot': '07:00 AM - 09:00 AM',
+            'title': 'Morning Stall Supply',
+            'customer_name': 'Ramesh Tea Stall',
+            'address': 'Main Market Corner',
+            'partner': partner_id,
+            'partner_name': 'Ramesh Patel',
+            'status': 'UPCOMING',
+            'items_count': 50,
+        }, format='json')
+        self.assertEqual(schedule_res.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(schedule_res.data['title'], 'Morning Stall Supply')
