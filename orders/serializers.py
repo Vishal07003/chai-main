@@ -11,6 +11,7 @@ class OrderItemReadSerializer(serializers.ModelSerializer):
     class Meta:
         model = OrderItem
         fields = ['id', 'product', 'product_details', 'quantity', 'price']
+        read_only_fields = ['id', 'product', 'product_details', 'quantity', 'price']
 
 class OrderItemWriteSerializer(serializers.Serializer):
     product_id = serializers.IntegerField()
@@ -26,7 +27,7 @@ class OrderSerializer(serializers.ModelSerializer):
             'id', 'customer', 'customer_name', 'status', 'total_amount',
             'delivery_address', 'notes', 'created_at', 'updated_at', 'items'
         ]
-        read_only_fields = ['id', 'customer', 'total_amount', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'customer', 'customer_name', 'total_amount', 'created_at', 'updated_at']
 
 class OrderCreateSerializer(serializers.ModelSerializer):
     items = OrderItemWriteSerializer(many=True, write_only=True)

@@ -6,13 +6,23 @@ from .serializers import OrderSerializer, OrderCreateSerializer
 
 class OrderViewSet(viewsets.ModelViewSet):
     """
-    Handles orders with role-based access:
-    - Customers: can view and create their own orders; can cancel if still 'pending'.
-    - Owners/Admins: full access to view, update statuses, manage all orders.
+    Handles orders with role-based access and strict state machine transitions:
+    - Customers: can view and create their own orders; can ONLY cancel if still 'pending'.
+    - Owners/Admins: full access to view, update statuses following the state machine, manage all orders.
     - Delivery Partners: can view orders assigned to them.
     """
     queryset = Order.objects.all()
     permission_classes = [permissions.IsAuthenticated]
+
+    # Permitted state transitions for order lifecycle
+    ALLOWED_TRANSITIONS = {
+        'pending': ['accepted', 'cancelled'],
+        'accepted': ['preparing', 'cancelled'],
+        'preparing': ['out_for_delivery', 'cancelled'],
+        'out_for_delivery': ['delivered', 'cancelled'],
+        'delivered': [],
+        'cancelled': [],
+    }
 
     def get_serializer_class(self):
         if self.action == 'create':
@@ -43,13 +53,31 @@ class OrderViewSet(viewsets.ModelViewSet):
         instance = serializer.instance
         is_owner = user.is_staff or user.is_superuser or (hasattr(user, 'profile') and user.profile.role == 'owner')
 
+        # Prevent changing immutable fields: customer, items, total_amount
+        if 'customer' in self.request.data:
+            raise PermissionDenied("Order customer cannot be reassigned.")
+
+        new_status = self.request.data.get('status')
+        current_status = instance.status
+
         if not is_owner:
-            # Customers can only cancel their own pending orders
-            new_status = self.request.data.get('status')
-            if new_status == 'cancelled' and instance.status == 'pending':
+            # Customers are only allowed to cancel their own orders, and only while status is 'pending'
+            if new_status == 'cancelled':
+                if current_status != 'pending':
+                    raise ValidationError({
+                        'status': f"Cannot cancel order in '{current_status}' status. Only pending orders can be cancelled."
+                    })
                 serializer.save(status='cancelled')
                 return
-            raise PermissionDenied("Only owners or admins can modify existing order statuses.")
+            raise PermissionDenied("Customers can only cancel pending orders. Status cannot be modified.")
+
+        # Owner/Staff status transitions enforcement
+        if new_status and new_status != current_status:
+            allowed = self.ALLOWED_TRANSITIONS.get(current_status, [])
+            if new_status not in allowed:
+                raise ValidationError({
+                    'status': f"Invalid status transition from '{current_status}' to '{new_status}'. Allowed transitions: {allowed}"
+                })
 
         serializer.save()
 

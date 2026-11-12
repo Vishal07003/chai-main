@@ -7,7 +7,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = UserProfile
         fields = ['phone', 'role', 'address', 'created_at']
-        read_only_fields = ['created_at']
+        read_only_fields = ['role', 'created_at']
 
 class UserSerializer(serializers.ModelSerializer):
     profile = UserProfileSerializer(read_only=True)
@@ -41,12 +41,11 @@ class UserProfileUpdateSerializer(serializers.ModelSerializer):
 class RegisterSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, required=True, validators=[validate_password])
     phone = serializers.CharField(write_only=True, required=True)
-    role = serializers.ChoiceField(choices=UserProfile.ROLE_CHOICES, default='customer', required=False)
     address = serializers.CharField(required=False, allow_blank=True, default='')
 
     class Meta:
         model = User
-        fields = ['username', 'password', 'email', 'first_name', 'last_name', 'phone', 'role', 'address']
+        fields = ['username', 'password', 'email', 'first_name', 'last_name', 'phone', 'address']
 
     def validate_phone(self, value):
         if UserProfile.objects.filter(phone=value).exists():
@@ -55,10 +54,10 @@ class RegisterSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         phone = validated_data.pop('phone')
-        role = validated_data.pop('role', 'customer')
         address = validated_data.pop('address', '')
         password = validated_data.pop('password')
 
         user = User.objects.create_user(password=password, **validated_data)
-        UserProfile.objects.create(user=user, phone=phone, role=role, address=address)
+        # Always enforce customer role for public registration
+        UserProfile.objects.create(user=user, phone=phone, role='customer', address=address)
         return user
