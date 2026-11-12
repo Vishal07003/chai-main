@@ -74,3 +74,40 @@ class DeliveryViewSet(viewsets.ModelViewSet):
         if not is_owner:
             raise PermissionDenied("Only owners can delete delivery records.")
         instance.delete()
+
+
+from .models import DeliveryPartner, DeliverySchedule
+from .serializers import DeliveryPartnerSerializer, DeliveryScheduleSerializer
+
+class DeliveryPartnerViewSet(viewsets.ModelViewSet):
+    """
+    Fleet Partner CRUD for Owners and fleet monitoring
+    """
+    queryset = DeliveryPartner.objects.all()
+    serializer_class = DeliveryPartnerSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        status_param = self.request.query_params.get('status')
+        if status_param:
+            queryset = queryset.filter(status=status_param.upper())
+        return queryset
+
+class DeliveryScheduleViewSet(viewsets.ModelViewSet):
+    """
+    Route and delivery schedule management
+    """
+    queryset = DeliverySchedule.objects.all()
+    serializer_class = DeliveryScheduleSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        status_param = self.request.query_params.get('status')
+        date_param = self.request.query_params.get('date')
+        if status_param:
+            queryset = queryset.filter(status=status_param.upper())
+        if date_param:
+            queryset = queryset.filter(scheduled_date=date_param)
+        return queryset
