@@ -6,7 +6,7 @@ from django.db.models import Q, Sum, Count
 from django.utils import timezone
 from decimal import Decimal
 
-from .models import Customer, Invoice, Payment
+from .models import Customer, Invoice, InvoiceItem, Payment
 from .serializers import (
     CustomerSerializer,
     InvoiceDetailSerializer,
@@ -44,6 +44,90 @@ class CustomerViewSet(viewsets.ModelViewSet):
 
         serializer = InvoiceDetailSerializer(invoices, many=True)
         return Response(serializer.data)
+
+    @action(detail=True, methods=['get'])
+    def summary(self, request, pk=None):
+        """
+        Customer purchase summary:
+        - Total billed
+        - Total paid
+        - Total pending
+        - Invoice count
+        - Last purchase date
+        """
+        customer = self.get_object()
+        invoices = customer.invoices.all()
+        total_billed = invoices.aggregate(s=Sum('grand_total'))['s'] or Decimal('0.00')
+        total_paid = Payment.objects.filter(invoice__customer=customer).aggregate(s=Sum('amount'))['s'] or Decimal('0.00')
+        pending = max(Decimal('0.00'), total_billed - total_paid)
+        last_invoice = invoices.order_by('-created_at').first()
+
+        return Response({
+            'customer_id': customer.id,
+            'name': customer.name,
+            'phone': customer.phone,
+            'total_invoices': invoices.count(),
+            'total_billed': str(total_billed),
+            'total_paid': str(total_paid),
+            'total_pending': str(pending),
+            'last_purchase_date': last_invoice.created_at.isoformat() if last_invoice else None,
+        })
+
+    @action(detail=True, methods=['post'], url_path='collect-payment')
+    def collect_payment(self, request, pk=None):
+        """
+        Collect payment towards customer's oldest pending invoices.
+        Body: { "amount": 500, "method": "cash" | "online", "notes": "..." }
+        """
+        customer = self.get_object()
+        amount_val = request.data.get('amount') or request.data.get('amountToDeduct')
+        method = request.data.get('method', 'cash').lower()
+        notes = request.data.get('notes', f"Customer direct collection for {customer.name}")
+
+        try:
+            amount = Decimal(str(amount_val))
+        except (ValueError, TypeError):
+            raise ValidationError({'amount': 'Valid payment amount is required.'})
+
+        if amount <= Decimal('0.00'):
+            raise ValidationError({'amount': 'Payment amount must be greater than zero.'})
+
+        # Find unpaid or partially paid invoices ordered from oldest to newest
+        pending_invoices = customer.invoices.exclude(status='paid').order_by('created_at')
+        if not pending_invoices.exists():
+            raise ValidationError({'error': 'Customer has no outstanding balance to pay.'})
+
+        remaining_to_allocate = amount
+        payments_created = []
+
+        for inv in pending_invoices:
+            due = inv.pending_amount
+            if due <= Decimal('0.00'):
+                continue
+
+            pay_amount = min(remaining_to_allocate, due)
+            pm = Payment.objects.create(
+                invoice=inv,
+                amount=pay_amount,
+                method=method if method in ('cash', 'online') else 'cash',
+                notes=notes,
+            )
+            inv.update_payment_status()
+            payments_created.append(pm.id)
+
+            remaining_to_allocate -= pay_amount
+            if remaining_to_allocate <= Decimal('0.00'):
+                break
+
+        allocated = amount - remaining_to_allocate
+        return Response({
+            'success': True,
+            'customer_id': customer.id,
+            'amount_requested': str(amount),
+            'amount_allocated': str(allocated),
+            'unallocated_credit': str(remaining_to_allocate),
+            'payments_created': len(payments_created),
+        }, status=status.HTTP_201_CREATED)
 
 class InvoiceViewSet(viewsets.ModelViewSet):
     """
@@ -150,6 +234,26 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         total_collected_all_time = Payment.objects.aggregate(s=Sum('amount'))['s'] or Decimal('0.00')
         total_pending = max(Decimal('0.00'), total_billed - total_collected_all_time)
 
+        # Period breakdown (Product-wise and Customer-wise for ReportsScreen)
+        product_sales = (
+            InvoiceItem.objects.filter(invoice__created_at__date=date_param)
+            .values('product_name')
+            .annotate(
+                units_sold=Sum('quantity'),
+                revenue=Sum('total_price'),
+            )
+            .order_by('-revenue')[:10]
+        )
+
+        customer_sales = (
+            invoices_today.values('customer_name')
+            .annotate(
+                bills_count=Count('id'),
+                total_spent=Sum('grand_total'),
+            )
+            .order_by('-total_spent')[:10]
+        )
+
         return Response({
             'date': date_param,
             'total_sales': str(total_sales),
@@ -158,4 +262,20 @@ class InvoiceViewSet(viewsets.ModelViewSet):
             'online_received': str(online_received),
             'total_received': str(total_received),
             'total_pending': str(total_pending),
+            'product_sales': [
+                {
+                    'product_name': p['product_name'],
+                    'units_sold': p['units_sold'],
+                    'revenue': str(p['revenue']),
+                }
+                for p in product_sales
+            ],
+            'customer_sales': [
+                {
+                    'customer_name': c['customer_name'],
+                    'bills_count': c['bills_count'],
+                    'total_spent': str(c['total_spent']),
+                }
+                for c in customer_sales
+            ],
         })

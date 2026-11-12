@@ -133,3 +133,30 @@ class BillingTests(TestCase):
         self.assertEqual(Decimal(stats_res.data['online_received']), Decimal('20.00'))
         self.assertEqual(Decimal(stats_res.data['total_received']), Decimal('70.00'))
         self.assertEqual(Decimal(stats_res.data['total_pending']), Decimal('20.00'))
+    def test_customer_summary_and_direct_collection(self):
+        """Test customer purchase summary and collect-payment endpoint."""
+        # 1. Create invoice with 100 due
+        inv = Invoice.objects.create(
+            invoice_number='INV-SUMMARY-1',
+            customer=self.customer,
+            customer_name=self.customer.name,
+            customer_phone=self.customer.phone,
+            grand_total=Decimal('100.00'),
+            status='unpaid',
+        )
+
+        # 2. Check customer summary
+        summary_res = self.client.get(f'/api/v1/customers/{self.customer.id}/summary/')
+        self.assertEqual(summary_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(Decimal(summary_res.data['total_billed']), Decimal('100.00'))
+        self.assertEqual(Decimal(summary_res.data['total_pending']), Decimal('100.00'))
+
+        # 3. Collect payment towards customer
+        collect_res = self.client.post(f'/api/v1/customers/{self.customer.id}/collect-payment/', {
+            'amount': '60.00',
+            'method': 'cash',
+        }, format='json')
+        self.assertEqual(collect_res.status_code, status.HTTP_201_CREATED)
+        inv.refresh_from_db()
+        self.assertEqual(inv.status, 'partially_paid')
+        self.assertEqual(inv.pending_amount, Decimal('40.00'))
