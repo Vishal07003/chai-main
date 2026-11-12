@@ -51,9 +51,29 @@ class DeliveriesTests(TestCase):
         self.assertAlmostEqual(self.delivery.current_lat, 19.0760)
 
     def test_driver_cannot_modify_another_drivers_delivery(self):
+        """Security: a driver cannot access or modify another driver's delivery."""
         self.client.force_authenticate(user=self.driver2)
         res = self.client.patch(f'/api/v1/deliveries/{self.delivery.id}/', {'status': 'picked_up'}, format='json')
         self.assertEqual(res.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_driver_cannot_reassign_delivery_to_another_driver(self):
+        """Security: an assigned driver cannot reassign the driver foreign key."""
+        self.client.force_authenticate(user=self.driver1)
+        res = self.client.patch(f'/api/v1/deliveries/{self.delivery.id}/', {'driver': self.driver2.id}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+        self.delivery.refresh_from_db()
+        self.assertEqual(self.delivery.driver, self.driver1)
+
+    def test_customer_cannot_update_delivery_status(self):
+        """Security: customer can only read delivery info for their order, not modify it."""
+        self.client.force_authenticate(user=self.customer)
+        # GET is permitted (view status of their tea delivery)
+        res_get = self.client.get(f'/api/v1/deliveries/{self.delivery.id}/')
+        self.assertEqual(res_get.status_code, status.HTTP_200_OK)
+
+        # PATCH is forbidden
+        res_patch = self.client.patch(f'/api/v1/deliveries/{self.delivery.id}/', {'status': 'delivered'}, format='json')
+        self.assertEqual(res_patch.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_owner_can_reassign_delivery(self):
         self.client.force_authenticate(user=self.owner)

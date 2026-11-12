@@ -46,29 +46,75 @@ class OrdersTests(TestCase):
         self.assertEqual(order.delivery.status, 'assigned')
 
     def test_customer_cannot_view_other_customer_orders(self):
-        # Create order for customer 1
         order1 = Order.objects.create(customer=self.customer1, delivery_address='Address 1', total_amount=50.00)
 
-        # Login customer 2
         self.client.force_authenticate(user=self.customer2)
         res = self.client.get('/api/v1/orders/')
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertEqual(len(res.data), 0)
 
-        # Direct access to customer 1's order returns 404
         detail_res = self.client.get(f'/api/v1/orders/{order1.id}/')
         self.assertEqual(detail_res.status_code, status.HTTP_404_NOT_FOUND)
 
-    def test_owner_can_view_and_update_all_orders(self):
-        order1 = Order.objects.create(customer=self.customer1, delivery_address='Address 1', total_amount=50.00)
+    def test_customer_can_cancel_own_pending_order(self):
+        """Customers are permitted to cancel their own order only while status is pending."""
+        order = Order.objects.create(customer=self.customer1, delivery_address='Address 1', total_amount=50.00, status='pending')
+        self.client.force_authenticate(user=self.customer1)
 
-        self.client.force_authenticate(user=self.owner)
-        res = self.client.get('/api/v1/orders/')
+        res = self.client.patch(f'/api/v1/orders/{order.id}/', {'status': 'cancelled'}, format='json')
         self.assertEqual(res.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(res.data), 1)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'cancelled')
 
-        # Update order status
-        update_res = self.client.patch(f'/api/v1/orders/{order1.id}/', {'status': 'preparing'}, format='json')
-        self.assertEqual(update_res.status_code, status.HTTP_200_OK)
-        order1.refresh_from_db()
-        self.assertEqual(order1.status, 'preparing')
+    def test_customer_cannot_cancel_already_accepted_order(self):
+        """Security: customers cannot cancel once the order has been accepted/preparing."""
+        order = Order.objects.create(customer=self.customer1, delivery_address='Address 1', total_amount=50.00, status='accepted')
+        self.client.force_authenticate(user=self.customer1)
+
+        res = self.client.patch(f'/api/v1/orders/{order.id}/', {'status': 'cancelled'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'accepted')
+
+    def test_customer_cannot_force_order_to_delivered(self):
+        """Security: customers cannot advance order statuses (e.g. to delivered)."""
+        order = Order.objects.create(customer=self.customer1, delivery_address='Address 1', total_amount=50.00, status='pending')
+        self.client.force_authenticate(user=self.customer1)
+
+        res = self.client.patch(f'/api/v1/orders/{order.id}/', {'status': 'delivered'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'pending')
+
+    def test_customer_cannot_reassign_order_customer(self):
+        """Security: customer cannot reassign the owner of the order to someone else."""
+        order = Order.objects.create(customer=self.customer1, delivery_address='Address 1', total_amount=50.00, status='pending')
+        self.client.force_authenticate(user=self.customer1)
+
+        res = self.client.patch(f'/api/v1/orders/{order.id}/', {'customer': self.customer2.id}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_owner_status_transitions_workflow(self):
+        """Owner must follow valid state machine transitions: pending -> accepted -> preparing -> out_for_delivery -> delivered."""
+        order = Order.objects.create(customer=self.customer1, delivery_address='Address 1', total_amount=50.00, status='pending')
+        self.client.force_authenticate(user=self.owner)
+
+        # 1. pending -> accepted: Valid
+        res = self.client.patch(f'/api/v1/orders/{order.id}/', {'status': 'accepted'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        # 2. accepted -> delivered: Invalid jump (must be preparing or cancelled)
+        res_invalid = self.client.patch(f'/api/v1/orders/{order.id}/', {'status': 'delivered'}, format='json')
+        self.assertEqual(res_invalid.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # 3. accepted -> preparing: Valid
+        res2 = self.client.patch(f'/api/v1/orders/{order.id}/', {'status': 'preparing'}, format='json')
+        self.assertEqual(res2.status_code, status.HTTP_200_OK)
+
+        # 4. preparing -> out_for_delivery: Valid
+        res3 = self.client.patch(f'/api/v1/orders/{order.id}/', {'status': 'out_for_delivery'}, format='json')
+        self.assertEqual(res3.status_code, status.HTTP_200_OK)
+
+        # 5. out_for_delivery -> delivered: Valid
+        res4 = self.client.patch(f'/api/v1/orders/{order.id}/', {'status': 'delivered'}, format='json')
+        self.assertEqual(res4.status_code, status.HTTP_200_OK)

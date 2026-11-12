@@ -10,13 +10,15 @@ class AccountsTests(TestCase):
         self.user = User.objects.create_user(username='testowner', password='Password123!', email='owner@example.com')
         self.profile = UserProfile.objects.create(user=self.user, phone='9876543210', role='owner')
 
+        self.customer_user = User.objects.create_user(username='regularcustomer', password='Password123!')
+        self.customer_profile = UserProfile.objects.create(user=self.customer_user, phone='8888888888', role='customer')
+
     def test_register_user_success(self):
         data = {
             'username': 'newcustomer',
             'password': 'StrongPassword123!',
             'email': 'customer@example.com',
             'phone': '9876543211',
-            'role': 'customer',
             'address': 'Chai Street 123'
         }
         res = self.client.post('/api/v1/accounts/register/', data, format='json')
@@ -25,6 +27,33 @@ class AccountsTests(TestCase):
         self.assertIn('access', res.data['tokens'])
         self.assertEqual(res.data['user']['username'], 'newcustomer')
         self.assertEqual(res.data['user']['profile']['role'], 'customer')
+
+    def test_registration_ignores_or_rejects_owner_role_escalation(self):
+        """Security: public registration must strictly create customer accounts even if role=owner is passed."""
+        data = {
+            'username': 'hacker',
+            'password': 'StrongPassword123!',
+            'email': 'hacker@example.com',
+            'phone': '9999999999',
+            'role': 'owner'  # Malicious attempt to escalate to owner
+        }
+        res = self.client.post('/api/v1/accounts/register/', data, format='json')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        user = User.objects.get(username='hacker')
+        self.assertEqual(user.profile.role, 'customer')
+
+    def test_registration_ignores_or_rejects_delivery_role_escalation(self):
+        """Security: public registration must strictly create customer accounts even if role=delivery is passed."""
+        data = {
+            'username': 'fake_driver',
+            'password': 'StrongPassword123!',
+            'phone': '9999999998',
+            'role': 'delivery'
+        }
+        res = self.client.post('/api/v1/accounts/register/', data, format='json')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        user = User.objects.get(username='fake_driver')
+        self.assertEqual(user.profile.role, 'customer')
 
     def test_register_duplicate_phone_fails(self):
         data = {
@@ -42,7 +71,6 @@ class AccountsTests(TestCase):
         self.assertIn('refresh', res.data)
 
     def test_profile_retrieval_and_update(self):
-        # Authenticate
         self.client.force_authenticate(user=self.user)
         res = self.client.get('/api/v1/accounts/profile/')
         self.assertEqual(res.status_code, status.HTTP_200_OK)
@@ -55,3 +83,11 @@ class AccountsTests(TestCase):
         self.assertEqual(patch_res.status_code, status.HTTP_200_OK)
         self.assertEqual(patch_res.data['first_name'], 'OwnerFirstName')
         self.assertEqual(patch_res.data['profile']['address'], 'New Updated Address')
+
+    def test_profile_update_cannot_escalate_role(self):
+        """Security: a customer cannot escalate their role to owner via PATCH profile."""
+        self.client.force_authenticate(user=self.customer_user)
+        patch_res = self.client.patch('/api/v1/accounts/profile/', {'role': 'owner'}, format='json')
+        self.assertEqual(patch_res.status_code, status.HTTP_200_OK)
+        self.customer_profile.refresh_from_db()
+        self.assertEqual(self.customer_profile.role, 'customer')
