@@ -79,7 +79,12 @@ class OrderViewSet(viewsets.ModelViewSet):
                     'status': f"Invalid status transition from '{current_status}' to '{new_status}'. Allowed transitions: {allowed}"
                 })
 
-        serializer.save()
+        instance = serializer.save()
+
+        # Trigger FCM notification to Customer on status change
+        if new_status and new_status != current_status:
+            from notifications.services import NotificationService
+            NotificationService.on_order_status_updated(instance)
 
     def perform_destroy(self, instance):
         user = self.request.user

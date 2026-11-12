@@ -83,4 +83,8 @@ class OrderCreateSerializer(serializers.ModelSerializer):
             from deliveries.models import Delivery
             Delivery.objects.get_or_create(order=order)
 
+            # Trigger FCM notification to Owner
+            from notifications.services import NotificationService
+            NotificationService.on_order_created(order)
+
         return order
