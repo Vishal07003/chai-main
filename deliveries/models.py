@@ -1,11 +1,14 @@
 from django.db import models
 from django.contrib.auth.models import User
 from orders.models import Order
+from products.models import Product
 
 class Delivery(models.Model):
     STATUS_CHOICES = (
         ('assigned', 'Assigned'),
+        ('accepted', 'Accepted'),
         ('picked_up', 'Picked Up'),
+        ('on_the_way', 'On The Way'),
         ('delivered', 'Delivered'),
         ('failed', 'Failed'),
     )
@@ -17,10 +20,31 @@ class Delivery(models.Model):
     delivered_time = models.DateTimeField(null=True, blank=True)
     current_lat = models.FloatField(null=True, blank=True)
     current_lng = models.FloatField(null=True, blank=True)
+    failure_reason = models.TextField(blank=True, default='')
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
         return f"Delivery for Order #{self.order.id} ({self.status})"
+
+
+class DeliveryItem(models.Model):
+    """
+    Records actual quantities delivered by the partner.
+    Used during Owner manual invoice review to audit discrepancies.
+    """
+    delivery = models.ForeignKey(Delivery, on_delete=models.CASCADE, related_name='delivered_items')
+    product = models.ForeignKey(Product, on_delete=models.SET_NULL, null=True, blank=True)
+    ordered_quantity = models.PositiveIntegerField(default=1)
+    delivered_quantity = models.PositiveIntegerField(default=0)
+    discrepancy_notes = models.TextField(blank=True, default='')
+
+    def __str__(self):
+        return f"DeliveryItem #{self.id}: {self.delivered_quantity}/{self.ordered_quantity} of {self.product.name if self.product else 'Item'}"
+
+    @property
+    def has_discrepancy(self) -> bool:
+        return self.delivered_quantity != self.ordered_quantity
+
 
 class DeliveryPartner(models.Model):
     """
@@ -56,6 +80,7 @@ class DeliveryPartner(models.Model):
 
     def __str__(self):
         return f"{self.name} ({self.vehicle_type} - {self.status})"
+
 
 class DeliverySchedule(models.Model):
     """
