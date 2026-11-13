@@ -7,3 +7,5 @@ staticfiles/
 .env
 *firebase*.json
 service-account*.json
+bd.sqlite3.backup_phase1
+.env.example
