@@ -27,6 +27,48 @@ class Delivery(models.Model):
         return f"Delivery for Order #{self.order.id} ({self.status})"
 
 
+class DeliveryLocationLog(models.Model):
+    """
+    Timestamped location breadcrumbs during active trips (On The Way).
+    Terminates immediately when delivery is marked delivered or failed.
+    """
+    delivery = models.ForeignKey(Delivery, on_delete=models.CASCADE, related_name='location_logs')
+    driver = models.ForeignKey(User, on_delete=models.CASCADE, related_name='delivery_breadcrumbs')
+    latitude = models.FloatField()
+    longitude = models.FloatField()
+    accuracy = models.FloatField(null=True, blank=True)
+    speed = models.FloatField(null=True, blank=True)
+    recorded_at = models.DateTimeField(db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-recorded_at']
+        indexes = [
+            models.Index(fields=['delivery', '-recorded_at']),
+        ]
+
+    def __str__(self):
+        return f"Log for Delivery #{self.delivery.id} ({self.latitude}, {self.longitude}) at {self.recorded_at}"
+
+
+class DeliveryStatusHistory(models.Model):
+    """
+    Audit log of every state transition during fulfillment.
+    """
+    delivery = models.ForeignKey(Delivery, on_delete=models.CASCADE, related_name='status_history')
+    from_status = models.CharField(max_length=20, blank=True, default='')
+    to_status = models.CharField(max_length=20)
+    changed_by = models.ForeignKey(User, on_delete=models.PROTECT)
+    notes = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Delivery #{self.delivery.id}: {self.from_status} -> {self.to_status} by {self.changed_by.username}"
+
+
 class DeliveryItem(models.Model):
     """
     Records actual quantities delivered by the partner.

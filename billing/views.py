@@ -161,6 +161,30 @@ class CompanyViewSet(viewsets.ModelViewSet):
 
         return Response(LedgerAdjustmentSerializer(adjustment).data, status=status.HTTP_201_CREATED)
 
+    @action(detail=True, methods=['get', 'post'], url_path='prices')
+    def prices(self, request, pk=None):
+        """
+        Manage contracted prices and volume slabs for this company:
+        - GET: list all contracted price slabs (active and expired)
+        - POST: add new contracted rate (Owner only)
+          Body: { "product": 1, "custom_price": 85.00, "min_quantity": 20, "valid_from": "2026-11-01", "valid_to": null }
+        """
+        company = self.get_object()
+
+        if request.method == 'GET':
+            prices = company.contracted_prices.select_related('product').all().order_by('product', '-min_quantity')
+            return Response(CompanyProductPriceSerializer(prices, many=True).data)
+
+        # POST: Create contracted price
+        user = request.user
+        if not (user.is_staff or user.is_superuser or (hasattr(user, 'profile') and user.profile.role == 'owner')):
+            raise PermissionDenied("Only owners can set contracted company rates.")
+
+        serializer = CompanyProductPriceSerializer(data={**request.data, 'company': company.id})
+        serializer.is_valid(raise_exception=True)
+        price_obj = serializer.save(company=company)
+        return Response(CompanyProductPriceSerializer(price_obj).data, status=status.HTTP_201_CREATED)
+
 
 class CustomerViewSet(viewsets.ModelViewSet):
     """
