@@ -376,7 +376,9 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         return Response({
             'date': date_param,
             'today_sales': str(total_sales),
+            'total_sales': str(total_sales),
             'today_received': str(total_received),
+            'total_received': str(total_received),
             'cash_received': str(cash_received),
             'online_received': str(online_received),
             'invoices_count': invoices_count,
