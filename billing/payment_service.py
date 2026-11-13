@@ -71,3 +71,4 @@ class PaymentAllocationService:
                 'unallocated_advance': str(payment.unallocated_amount),
                 'invoices_settled': invoices_settled,
             }
+

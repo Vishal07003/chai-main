@@ -207,3 +207,4 @@ class Phase1ArchitectureTests(TestCase):
                 confirmed_items=[{'product_id': self.chai.id, 'quantity': 5}],
                 owner_user=self.staff_user
             )
+

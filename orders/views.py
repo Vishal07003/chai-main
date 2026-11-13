@@ -3,6 +3,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from django.utils import timezone
+from decimal import Decimal
 from .models import Order, OrderItem, PriceOverrideRequest
 from .serializers import (
     OrderSerializer,
