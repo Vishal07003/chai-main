@@ -145,9 +145,10 @@ SIMPLE_JWT = {
 # Firebase Cloud Messaging Credentials Path
 FIREBASE_CREDENTIALS_PATH = os.getenv('FIREBASE_CREDENTIALS_PATH', str(BASE_DIR / 'firebase-service-account.json'))
 
-# OTP Provider Settings (2Factor.in)
+# OTP Provider Settings (2Factor.in SMS Gateway)
 TWOFACTOR_API_KEY = os.getenv('TWOFACTOR_API_KEY', os.getenv('OTP_API_KEY', ''))
 OTP_PROVIDER_BASE_URL = os.getenv('OTP_PROVIDER_BASE_URL', 'https://2factor.in/API/V1')
+OTP_SMS_TEMPLATE = os.getenv('OTP_SMS_TEMPLATE', '')
 OTP_EXPIRY_MINUTES = int(os.getenv('OTP_EXPIRY_MINUTES', '5'))
 OTP_RESEND_COOLDOWN_SECONDS = int(os.getenv('OTP_RESEND_COOLDOWN_SECONDS', '60'))
 OTP_MOCK_MODE = TESTING or os.getenv('OTP_MOCK_MODE', 'False' if TWOFACTOR_API_KEY else 'True').lower() in ('true', '1', 'yes')

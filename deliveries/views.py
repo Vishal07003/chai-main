@@ -112,6 +112,9 @@ class DeliveryViewSet(viewsets.ModelViewSet):
                 changed_by=user,
                 notes=self.request.data.get('notes', '')
             )
+            from notifications.services import NotificationService
+            if new_status == 'delivered':
+                NotificationService.on_delivery_completed(updated_delivery)
 
         # Trigger FCM notification when driver is assigned or changed
         if updated_delivery.driver and updated_delivery.driver != previous_driver:
@@ -267,7 +270,9 @@ class DeliveryViewSet(viewsets.ModelViewSet):
 
 class DeliveryPartnerViewSet(viewsets.ModelViewSet):
     """
-    Fleet Partner CRUD for Owners and driver profile monitoring
+    Fleet Partner CRUD for Owners and driver profile monitoring.
+    Owner can create partners, update vehicle details, and activate/deactivate accounts.
+    Automatically provisions/links User and UserProfile with role='delivery'.
     """
     queryset = DeliveryPartner.objects.all()
     serializer_class = DeliveryPartnerSerializer
@@ -288,6 +293,79 @@ class DeliveryPartnerViewSet(viewsets.ModelViewSet):
             return queryset.filter(user=user)
 
         return queryset.none()
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        is_owner = user.is_staff or user.is_superuser or (hasattr(user, 'profile') and user.profile.role == 'owner')
+        if not is_owner:
+            raise PermissionDenied("Only business owners can create and register Delivery Partners.")
+
+        phone = serializer.validated_data.get('phone', '').strip()
+        from accounts.otp_service import OtpProviderService
+        clean_mobile = OtpProviderService.clean_phone(phone)
+        if not clean_mobile or len(clean_mobile) != 10:
+            raise ValidationError({'phone': 'Please enter a valid 10-digit mobile number.'})
+
+        name = serializer.validated_data.get('name', '').strip()
+        if not name:
+            raise ValidationError({'name': 'Partner full name is required.'})
+
+        # Check duplicate mobile number
+        from accounts.models import UserProfile
+        from django.contrib.auth.models import User
+
+        if UserProfile.objects.filter(phone=clean_mobile).exclude(role='delivery').exists():
+            raise ValidationError({'phone': 'This mobile number is already registered under another account.'})
+
+        if DeliveryPartner.objects.filter(phone=clean_mobile).exists():
+            raise ValidationError({'phone': 'A delivery partner with this mobile number is already registered.'})
+
+        # Find or create User and UserProfile
+        driver_user = None
+        existing_profile = UserProfile.objects.filter(phone=clean_mobile).first()
+        if existing_profile:
+            driver_user = existing_profile.user
+            existing_profile.role = 'delivery'
+            existing_profile.save(update_fields=['role'])
+            if name:
+                parts = name.split(' ')
+                driver_user.first_name = parts[0]
+                driver_user.last_name = ' '.join(parts[1:]) if len(parts) > 1 else ''
+                driver_user.save(update_fields=['first_name', 'last_name'])
+        else:
+            base_username = f"driver_{clean_mobile}"
+            username = base_username
+            counter = 1
+            while User.objects.filter(username=username).exists():
+                username = f"{base_username}_{counter}"
+                counter += 1
+
+            driver_user = User.objects.create_user(
+                username=username,
+                first_name=name.split(' ')[0] if name else '',
+                last_name=' '.join(name.split(' ')[1:]) if ' ' in name else '',
+            )
+            UserProfile.objects.create(
+                user=driver_user,
+                phone=clean_mobile,
+                role='delivery',
+            )
+
+        serializer.save(user=driver_user, phone=clean_mobile, is_active=True)
+
+    def perform_update(self, serializer):
+        user = self.request.user
+        is_owner = user.is_staff or user.is_superuser or (hasattr(user, 'profile') and user.profile.role == 'owner')
+        partner = serializer.instance
+
+        if not is_owner and partner.user != user:
+            raise PermissionDenied("You do not have permission to modify this delivery partner profile.")
+
+        # If owner updates is_active, sync user.is_active as well
+        instance = serializer.save()
+        if is_owner and 'is_active' in serializer.validated_data and instance.user:
+            instance.user.is_active = serializer.validated_data['is_active']
+            instance.user.save(update_fields=['is_active'])
 
 
 class DeliveryScheduleViewSet(viewsets.ModelViewSet):
