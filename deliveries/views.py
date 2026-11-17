@@ -53,11 +53,20 @@ class DeliveryViewSet(viewsets.ModelViewSet):
             if driver_id:
                 queryset = queryset.filter(driver_id=driver_id)
             if status_param:
-                queryset = queryset.filter(status=status_param)
+                if status_param == 'history':
+                    queryset = queryset.filter(status__in=['delivered', 'failed'])
+                else:
+                    queryset = queryset.filter(status=status_param)
             return queryset
 
         if hasattr(user, 'profile') and user.profile.role == 'delivery':
-            return queryset.filter(driver=user)
+            status_param = self.request.query_params.get('status')
+            partner_qs = queryset.filter(driver=user)
+            if status_param == 'history':
+                return partner_qs.filter(status__in=['delivered', 'failed'])
+            elif status_param:
+                return partner_qs.filter(status=status_param)
+            return partner_qs
 
         return queryset.filter(order__customer=user)
 
@@ -227,6 +236,33 @@ class DeliveryViewSet(viewsets.ModelViewSet):
             saved_items.append(d_item)
 
         return Response(DeliveryItemSerializer(saved_items, many=True).data)
+
+    @action(detail=True, methods=['get'], url_path='tracking-history')
+    def tracking_history(self, request, pk=None):
+        """
+        Owner/Driver tracking details:
+        Returns location breadcrumbs and status transition timeline.
+        """
+        delivery = self.get_object()
+        logs = delivery.location_logs.all().order_by('-recorded_at')[:100]
+        history = delivery.status_history.all().order_by('created_at')
+
+        return Response({
+            'delivery_id': delivery.id,
+            'status': delivery.status,
+            'driver': {
+                'id': delivery.driver.id,
+                'name': f"{delivery.driver.first_name} {delivery.driver.last_name}".strip() or delivery.driver.username,
+                'phone': getattr(getattr(delivery.driver, 'profile', None), 'phone', ''),
+            } if delivery.driver else None,
+            'current_lat': delivery.current_lat,
+            'current_lng': delivery.current_lng,
+            'updated_at': delivery.updated_at,
+            'pickup_time': delivery.pickup_time,
+            'delivered_time': delivery.delivered_time,
+            'location_logs': DeliveryLocationLogSerializer(logs, many=True).data,
+            'status_history': DeliveryStatusHistorySerializer(history, many=True).data,
+        })
 
 
 class DeliveryPartnerViewSet(viewsets.ModelViewSet):
