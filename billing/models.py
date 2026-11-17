@@ -63,12 +63,14 @@ class CompanyProductPrice(models.Model):
 
 class Customer(models.Model):
     """
-    Walk-in / retail credit customer model (preserved for Quick Billing)
+    Centralized Customer entity for Chai Flow:
+    - Name, Mobile number (+91), Delivery address
+    - Preserves link to historical Company if migrated
     """
-    name = models.CharField(max_length=200)
+    name = models.CharField(max_length=200, db_index=True)
     phone = models.CharField(max_length=15, db_index=True)
     address = models.TextField(blank=True, default='')
-    company = models.ForeignKey(Company, on_delete=models.SET_NULL, null=True, blank=True, related_name='individual_contacts')
+    company = models.ForeignKey('Company', on_delete=models.SET_NULL, null=True, blank=True, related_name='individual_contacts')
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -76,6 +78,26 @@ class Customer(models.Model):
 
     def __str__(self):
         return f"{self.name} ({self.phone})"
+
+
+class CustomerProductPrice(models.Model):
+    """
+    Customer-specific custom selling price:
+    - Overrides the standard product selling price for this specific customer
+    - Set and controlled exclusively by Owner
+    """
+    customer = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name='custom_prices')
+    product = models.ForeignKey('products.Product', on_delete=models.CASCADE, related_name='customer_prices')
+    custom_price = models.DecimalField(max_digits=10, decimal_places=2)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['customer', 'product']
+        unique_together = ('customer', 'product')
+
+    def __str__(self):
+        return f"{self.customer.name} - {self.product.name} @ ₹{self.custom_price}"
 
 
 class Invoice(models.Model):
@@ -152,8 +174,9 @@ class InvoiceItem(models.Model):
 class Payment(models.Model):
     """
     Financial Payment Collection:
-    - Can be linked to a single Invoice (legacy / walk-in)
-    - Can be linked to a Company (B2B bulk payment or advance)
+    - Links to Customer (unified workflow)
+    - Can link to a specific Invoice or unallocated Customer account balance
+    - Preserves Company reference for backward compatibility
     """
     METHOD_CHOICES = (
         ('cash', 'Cash'),
@@ -163,8 +186,9 @@ class Payment(models.Model):
         ('cheque', 'Cheque'),
     )
 
+    customer = models.ForeignKey(Customer, on_delete=models.PROTECT, null=True, blank=True, related_name='payments')
     company = models.ForeignKey(Company, on_delete=models.PROTECT, null=True, blank=True, related_name='payments')
-    invoice = models.ForeignKey(Invoice, on_delete=models.CASCADE, null=True, blank=True, related_name='payments')
+    invoice = models.ForeignKey('Invoice', on_delete=models.CASCADE, null=True, blank=True, related_name='payments')
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     method = models.CharField(max_length=20, choices=METHOD_CHOICES, default='cash')
     received_at = models.DateTimeField(default=timezone.now, db_index=True)

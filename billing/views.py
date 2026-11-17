@@ -1,11 +1,25 @@
 from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.renderers import BaseRenderer
 from rest_framework.exceptions import ValidationError, PermissionDenied
 from django.db.models import Q, Sum, Count
 from django.utils import timezone
 from decimal import Decimal
 from django.http import HttpResponse
+
+class PassthroughPdfRenderer(BaseRenderer):
+    """
+    Renders raw binary PDF data for DRF content negotiation.
+    Matches Accept: application/pdf, Accept: */*, or default requests.
+    """
+    media_type = 'application/pdf'
+    format = 'pdf'
+    charset = None
+    render_style = 'binary'
+
+    def render(self, data, accepted_media_type=None, renderer_context=None):
+        return data
 
 from .models import (
     Company,
@@ -219,9 +233,9 @@ class CustomerViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'])
     def summary(self, request, pk=None):
         customer = self.get_object()
-        invoices = customer.invoices.all()
+        invoices = customer.invoices.exclude(status='void')
         total_billed = invoices.aggregate(s=Sum('grand_total'))['s'] or Decimal('0.00')
-        total_paid = Payment.objects.filter(invoice__customer=customer).aggregate(s=Sum('amount'))['s'] or Decimal('0.00')
+        total_paid = customer.payments.aggregate(s=Sum('amount'))['s'] or Decimal('0.00')
         pending = max(Decimal('0.00'), total_billed - total_paid)
         last_invoice = invoices.order_by('-created_at').first()
 
@@ -229,12 +243,57 @@ class CustomerViewSet(viewsets.ModelViewSet):
             'customer_id': customer.id,
             'name': customer.name,
             'phone': customer.phone,
+            'address': customer.address,
             'total_invoices': invoices.count(),
             'total_billed': str(total_billed),
             'total_paid': str(total_paid),
             'total_pending': str(pending),
             'last_purchase_date': last_invoice.created_at.isoformat() if last_invoice else None,
         })
+
+    @action(detail=True, methods=['get'])
+    def orders(self, request, pk=None):
+        """List all customer orders"""
+        customer = self.get_object()
+        from orders.serializers import OrderSerializer
+        orders = customer.customer_orders.all().order_by('-created_at')
+        return Response(OrderSerializer(orders, many=True).data)
+
+    @action(detail=True, methods=['get', 'post'], url_path='prices')
+    def prices(self, request, pk=None):
+        """
+        Manage customer-specific selling prices (Owner only):
+        - GET: list all customer custom prices
+        - POST: add or update custom rate for a product
+          Body: { "product": 1, "custom_price": 85.00 }
+        """
+        customer = self.get_object()
+        from .models import CustomerProductPrice
+        from .serializers import CustomerProductPriceSerializer
+
+        if request.method == 'GET':
+            prices = customer.custom_prices.filter(is_active=True).select_related('product')
+            return Response(CustomerProductPriceSerializer(prices, many=True).data)
+
+        # POST
+        user = request.user
+        if not (user.is_staff or user.is_superuser or (hasattr(user, 'profile') and user.profile.role == 'owner')):
+            raise PermissionDenied("Only owners can set custom customer rates.")
+
+        product_id = request.data.get('product')
+        custom_price = request.data.get('custom_price')
+        if not product_id or custom_price is None:
+            raise ValidationError({'detail': 'product and custom_price are required.'})
+
+        price_obj, _ = CustomerProductPrice.objects.update_or_create(
+            customer=customer,
+            product_id=product_id,
+            defaults={
+                'custom_price': Decimal(str(custom_price)),
+                'is_active': True,
+            }
+        )
+        return Response(CustomerProductPriceSerializer(price_obj).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['post'], url_path='collect-payment')
     def collect_payment(self, request, pk=None):
@@ -252,28 +311,37 @@ class CustomerViewSet(viewsets.ModelViewSet):
             raise ValidationError({'amount': 'Payment amount must be greater than zero.'})
 
         pending_invoices = customer.invoices.exclude(status='paid').order_by('created_at')
-        if not pending_invoices.exists():
-            raise ValidationError({'error': 'Customer has no outstanding balance to pay.'})
 
-        # Create master payment and allocate FIFO
+        # Create payment linked directly to Customer
         pm = Payment.objects.create(
+            customer=customer,
+            company=customer.company,
             amount=amount,
             method=method if method in ('cash', 'online', 'upi', 'bank_transfer') else 'cash',
             notes=notes,
             recorded_by=request.user,
         )
-        alloc_res = PaymentAllocationService.allocate_payment_fifo(
-            payment=pm,
-            target_invoices=list(pending_invoices)
-        )
+
+        allocated_now = Decimal('0.00')
+        invoices_settled = []
+
+        if pending_invoices.exists():
+            alloc_res = PaymentAllocationService.allocate_payment_fifo(
+                payment=pm,
+                target_invoices=list(pending_invoices)
+            )
+            allocated_now = Decimal(str(alloc_res['allocated_now']))
+            invoices_settled = alloc_res['invoices_settled']
+
+        unallocated_advance = max(Decimal('0.00'), amount - allocated_now)
 
         return Response({
             'success': True,
             'customer_id': customer.id,
             'amount_requested': str(amount),
-            'amount_allocated': alloc_res['allocated_now'],
-            'unallocated_credit': alloc_res['unallocated_advance'],
-            'invoices_settled': alloc_res['invoices_settled'],
+            'amount_allocated': str(allocated_now),
+            'unallocated_credit': str(unallocated_advance),
+            'invoices_settled': invoices_settled,
         }, status=status.HTTP_201_CREATED)
 
 
@@ -368,7 +436,7 @@ class InvoiceViewSet(viewsets.ModelViewSet):
 
         return Response(InvoiceDetailSerializer(invoice).data, status=status.HTTP_201_CREATED)
 
-    @action(detail=True, methods=['get'])
+    @action(detail=True, methods=['get'], renderer_classes=[PassthroughPdfRenderer])
     def pdf(self, request, pk=None):
         invoice = self.get_object()
         pdf_bytes = generate_invoice_pdf(invoice)

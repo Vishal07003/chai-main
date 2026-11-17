@@ -2,7 +2,7 @@ from rest_framework import serializers
 from decimal import Decimal
 from django.db import transaction, models
 from django.utils import timezone
-from .models import Company, CompanyProductPrice, Customer, Invoice, InvoiceItem, Payment, PaymentAllocation, LedgerAdjustment
+from .models import Company, CompanyProductPrice, Customer, CustomerProductPrice, Invoice, InvoiceItem, Payment, PaymentAllocation, LedgerAdjustment
 from products.models import Product
 
 class CompanyProductPriceSerializer(serializers.ModelSerializer):
@@ -52,29 +52,47 @@ class CompanySerializer(serializers.ModelSerializer):
         return str(max(Decimal('0.00'), billed - paid))
 
 
+class CustomerProductPriceSerializer(serializers.ModelSerializer):
+    product_name = serializers.CharField(source='product.name', read_only=True)
+
+    class Meta:
+        model = CustomerProductPrice
+        fields = [
+            'id', 'customer', 'product', 'product_name', 'custom_price',
+            'is_active', 'created_at'
+        ]
+        read_only_fields = ['id', 'created_at']
+
+
 class CustomerSerializer(serializers.ModelSerializer):
     total_bills = serializers.SerializerMethodField()
     total_billed_amount = serializers.SerializerMethodField()
+    total_paid_amount = serializers.SerializerMethodField()
     total_pending_amount = serializers.SerializerMethodField()
-    company_name = serializers.CharField(source='company.name', read_only=True)
+    custom_prices = CustomerProductPriceSerializer(many=True, read_only=True)
 
     class Meta:
         model = Customer
         fields = [
-            'id', 'name', 'phone', 'address', 'company', 'company_name', 'created_at',
-            'total_bills', 'total_billed_amount', 'total_pending_amount'
+            'id', 'name', 'phone', 'address', 'created_at',
+            'total_bills', 'total_billed_amount', 'total_paid_amount', 'total_pending_amount',
+            'custom_prices'
         ]
-        read_only_fields = ['id', 'created_at', 'total_bills', 'total_billed_amount', 'total_pending_amount']
+        read_only_fields = ['id', 'created_at', 'total_bills', 'total_billed_amount', 'total_paid_amount', 'total_pending_amount', 'custom_prices']
 
     def get_total_bills(self, obj):
-        return obj.invoices.count()
+        return obj.invoices.exclude(status='void').count()
 
     def get_total_billed_amount(self, obj):
-        res = obj.invoices.aggregate(total=models.Sum('grand_total'))['total']
+        res = obj.invoices.exclude(status='void').aggregate(total=models.Sum('grand_total'))['total']
+        return str(res or Decimal('0.00'))
+
+    def get_total_paid_amount(self, obj):
+        res = Payment.objects.filter(models.Q(customer=obj) | models.Q(invoice__customer=obj)).distinct().aggregate(total=models.Sum('amount'))['total']
         return str(res or Decimal('0.00'))
 
     def get_total_pending_amount(self, obj):
-        pending = sum(inv.pending_amount for inv in obj.invoices.all())
+        pending = sum(inv.pending_amount for inv in obj.invoices.exclude(status='void').all())
         return str(pending)
 
 
@@ -248,6 +266,7 @@ class InvoiceCreateSerializer(serializers.Serializer):
                         'initial_payment_amount': f"Payment amount (₹{init_amount}) cannot exceed total bill amount (₹{invoice.grand_total})."
                     })
                 pm = Payment.objects.create(
+                    customer=customer,
                     company=company,
                     invoice=invoice,
                     amount=init_amount,
