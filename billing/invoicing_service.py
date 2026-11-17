@@ -15,15 +15,31 @@ class InvoicingService:
     """
 
     @classmethod
-    def resolve_item_unit_price(cls, company: Company, product, quantity: int) -> Decimal:
+    def resolve_item_unit_price(cls, customer_or_company, product, quantity: int) -> Decimal:
         """
-        Resolves contracted company price based on quantity slabs and active date.
-        Falls back to product.price if no company slab applies.
+        Resolves customer-specific custom price or company contracted price.
+        Falls back to product.price if no custom rate applies.
         """
+        from .models import Customer, CustomerProductPrice
         today = timezone.now().date()
-        if company:
+
+        # 1. Check CustomerProductPrice first (Customer-first consolidated workflow)
+        if isinstance(customer_or_company, Customer):
+            cust_price = CustomerProductPrice.objects.filter(
+                customer=customer_or_company,
+                product=product,
+                is_active=True
+            ).first()
+            if cust_price:
+                return cust_price.custom_price
+            # Fall back to customer's linked company if present
+            if customer_or_company.company:
+                customer_or_company = customer_or_company.company
+
+        # 2. Check CompanyProductPrice (backward compatibility)
+        if isinstance(customer_or_company, Company) and customer_or_company:
             slab = CompanyProductPrice.objects.filter(
-                company=company,
+                company=customer_or_company,
                 product=product,
                 is_active=True,
                 min_quantity__lte=quantity,
@@ -57,8 +73,9 @@ class InvoicingService:
                 raise ValidationError({"error": f"Invoice #{locked_order.invoice.invoice_number} already exists for Order #{locked_order.id}."})
 
             company = locked_order.company
-            customer_name = company.name if company else (locked_order.customer.get_full_name() or locked_order.customer.username)
-            customer_phone = company.phone if company else (getattr(locked_order.customer.profile, 'phone', '') if hasattr(locked_order.customer, 'profile') else '')
+            customer = locked_order.customer_profile
+            customer_name = customer.name if customer else (company.name if company else (locked_order.customer.get_full_name() or locked_order.customer.username))
+            customer_phone = customer.phone if customer else (company.phone if company else (getattr(locked_order.customer.profile, 'phone', '') if hasattr(locked_order.customer, 'profile') else ''))
 
             date_str = timezone.now().strftime('%Y%m%d')
             # Generate unique invoice number
@@ -69,6 +86,7 @@ class InvoicingService:
                 invoice_number=invoice_number,
                 order=locked_order,
                 company=company,
+                customer=customer,
                 customer_name=customer_name,
                 customer_phone=customer_phone,
                 status='unpaid',
@@ -78,6 +96,8 @@ class InvoicingService:
 
             subtotal = Decimal('0.00')
             total_discount = Decimal('0.00')
+
+            pricing_entity = customer or company
 
             for item_data in confirmed_items:
                 product_id = item_data.get('product_id')
@@ -89,7 +109,7 @@ class InvoicingService:
                 product = Product.objects.get(id=product_id)
 
                 # 1. Base rate resolution (backend only)
-                base_unit_price = cls.resolve_item_unit_price(company, product, qty)
+                base_unit_price = cls.resolve_item_unit_price(pricing_entity, product, qty)
 
                 # 2. Check for Owner-Approved Price Override for this item
                 approved_override = PriceOverrideRequest.objects.filter(
