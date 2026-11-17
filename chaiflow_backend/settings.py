@@ -129,16 +129,30 @@ REST_FRAMEWORK = {
 }
 
 # Simple JWT Configuration for Mobile App Auth
-jwt_access_days = int(os.getenv('JWT_ACCESS_TOKEN_LIFETIME_DAYS', '7'))
-jwt_refresh_days = int(os.getenv('JWT_REFRESH_TOKEN_LIFETIME_DAYS', '30'))
-jwt_signing_key = os.getenv('JWT_SIGNING_KEY', SECRET_KEY)
+jwt_signing_key = os.getenv('JWT_SIGNING_KEY')
+if not jwt_signing_key:
+    if TESTING:
+        jwt_signing_key = 'test-jwt-signing-key-for-unit-tests-only'
+    else:
+        raise RuntimeError("JWT_SIGNING_KEY environment variable is not set! Please define JWT_SIGNING_KEY in .env.")
+
+jwt_algorithm = os.getenv('JWT_ALGORITHM', 'HS256')
+jwt_access_minutes = int(os.getenv('JWT_ACCESS_TOKEN_LIFETIME_MINUTES', os.getenv('JWT_ACCESS_TOKEN_LIFETIME_DAYS', '60') if os.getenv('JWT_ACCESS_TOKEN_LIFETIME_MINUTES') else '60'))
+# Support both minutes and legacy days configuration gracefully
+if os.getenv('JWT_ACCESS_TOKEN_LIFETIME_DAYS') and not os.getenv('JWT_ACCESS_TOKEN_LIFETIME_MINUTES'):
+    access_token_lifetime = timedelta(days=int(os.getenv('JWT_ACCESS_TOKEN_LIFETIME_DAYS')))
+else:
+    access_token_lifetime = timedelta(minutes=jwt_access_minutes)
+
+jwt_refresh_days = int(os.getenv('JWT_REFRESH_TOKEN_LIFETIME_DAYS', '7'))
 
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(days=jwt_access_days),
+    'ACCESS_TOKEN_LIFETIME': access_token_lifetime,
     'REFRESH_TOKEN_LIFETIME': timedelta(days=jwt_refresh_days),
+    'ALGORITHM': jwt_algorithm,
+    'SIGNING_KEY': jwt_signing_key,
     'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': False,
-    'SIGNING_KEY': jwt_signing_key,
     'AUTH_HEADER_TYPES': ('Bearer',),
 }
 
