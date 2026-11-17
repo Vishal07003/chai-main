@@ -21,19 +21,25 @@ class OrderItemWriteSerializer(serializers.Serializer):
 
 class OrderSerializer(serializers.ModelSerializer):
     items = OrderItemReadSerializer(many=True, read_only=True)
-    customer_name = serializers.ReadOnlyField(source='customer.username')
-    company_name = serializers.ReadOnlyField(source='company.name')
+    customer_name = serializers.SerializerMethodField()
     has_invoice = serializers.BooleanField(read_only=True)
     invoice_number = serializers.SerializerMethodField()
 
     class Meta:
         model = Order
         fields = [
-            'id', 'customer', 'customer_name', 'company', 'company_name',
+            'id', 'customer', 'customer_profile', 'customer_name', 'company',
             'status', 'total_amount', 'delivery_address', 'notes',
             'has_invoice', 'invoice_number', 'created_at', 'updated_at', 'items'
         ]
-        read_only_fields = ['id', 'customer', 'customer_name', 'company_name', 'total_amount', 'has_invoice', 'invoice_number', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'customer', 'customer_name', 'total_amount', 'has_invoice', 'invoice_number', 'created_at', 'updated_at']
+
+    def get_customer_name(self, obj):
+        if obj.customer_profile:
+            return obj.customer_profile.name
+        if obj.company:
+            return obj.company.name
+        return obj.customer.get_full_name() or obj.customer.username
 
     def get_invoice_number(self, obj):
         if hasattr(obj, 'invoice') and obj.invoice:
@@ -41,12 +47,13 @@ class OrderSerializer(serializers.ModelSerializer):
         return None
 
 class OrderCreateSerializer(serializers.ModelSerializer):
+    customer_id = serializers.IntegerField(required=False, allow_null=True)
     company_id = serializers.IntegerField(required=False, allow_null=True)
     items = OrderItemWriteSerializer(many=True, write_only=True)
 
     class Meta:
         model = Order
-        fields = ['id', 'company_id', 'delivery_address', 'notes', 'items']
+        fields = ['id', 'customer_id', 'company_id', 'delivery_address', 'notes', 'items']
 
     def validate_items(self, value):
         if not value:
@@ -55,8 +62,17 @@ class OrderCreateSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         items_data = validated_data.pop('items')
+        customer_id = validated_data.pop('customer_id', None)
         company_id = validated_data.pop('company_id', None)
         user = self.context['request'].user
+
+        customer_profile = None
+        if customer_id:
+            from billing.models import Customer
+            try:
+                customer_profile = Customer.objects.get(id=customer_id)
+            except Customer.DoesNotExist:
+                raise serializers.ValidationError({'customer_id': 'Customer does not exist.'})
 
         company = None
         if company_id:
@@ -65,11 +81,18 @@ class OrderCreateSerializer(serializers.ModelSerializer):
                 company = Company.objects.get(id=company_id)
             except Company.DoesNotExist:
                 raise serializers.ValidationError({'company_id': 'Company does not exist.'})
+        elif customer_profile and customer_profile.company:
+            company = customer_profile.company
+
+        # If delivery address not provided, default to customer address
+        delivery_address = validated_data.get('delivery_address') or (customer_profile.address if customer_profile else '') or 'Walk-in / Stalls'
+        validated_data['delivery_address'] = delivery_address
 
         with transaction.atomic():
             total = Decimal('0.00')
             order = Order.objects.create(
                 customer=user,
+                customer_profile=customer_profile,
                 company=company,
                 total_amount=Decimal('0.00'),
                 **validated_data
@@ -79,6 +102,8 @@ class OrderCreateSerializer(serializers.ModelSerializer):
             products = {p.id: p for p in Product.objects.filter(id__in=product_ids)}
 
             from billing.invoicing_service import InvoicingService
+
+            pricing_entity = customer_profile or company
 
             for item_data in items_data:
                 pid = item_data['product_id']
@@ -90,7 +115,7 @@ class OrderCreateSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError({'items': f"Product ID {pid} does not exist."})
 
                 product = products[pid]
-                standard_rate = InvoicingService.resolve_item_unit_price(company, product, qty)
+                standard_rate = InvoicingService.resolve_item_unit_price(pricing_entity, product, qty)
 
                 # If a discounted rate is requested, create a pending approval request
                 final_item_price = standard_rate

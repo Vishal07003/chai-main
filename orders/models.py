@@ -14,6 +14,7 @@ class Order(models.Model):
     )
 
     customer = models.ForeignKey(User, on_delete=models.CASCADE, related_name='orders')
+    customer_profile = models.ForeignKey('billing.Customer', on_delete=models.SET_NULL, null=True, blank=True, related_name='customer_orders')
     company = models.ForeignKey('billing.Company', on_delete=models.SET_NULL, null=True, blank=True, related_name='orders')
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     total_amount = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
