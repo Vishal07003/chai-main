@@ -114,6 +114,7 @@ class DeliveryPartner(models.Model):
     number_plate = models.CharField(max_length=30, blank=True, default='')
     location = models.CharField(max_length=200, blank=True, default='Hub Central')
     status = models.CharField(max_length=15, choices=STATUS_CHOICES, default='READY')
+    is_active = models.BooleanField(default=True, help_text="Owner controls whether delivery partner can log in and accept orders")
     avatar_url = models.URLField(blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
 

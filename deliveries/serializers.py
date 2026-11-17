@@ -72,7 +72,7 @@ class DeliveryPartnerSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'user', 'name', 'phone', 'emergency_phone',
             'license_number', 'vehicle_type', 'vehicle_model',
-            'number_plate', 'location', 'status', 'avatar_url',
+            'number_plate', 'location', 'status', 'is_active', 'avatar_url',
             'active_deliveries_count', 'created_at',
         ]
         read_only_fields = ['id', 'active_deliveries_count', 'created_at']
