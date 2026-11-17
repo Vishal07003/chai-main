@@ -142,3 +142,49 @@ class Phase3DeliveryWorkflowTests(TestCase):
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertFalse(res.data['active_tracking'])
         self.assertEqual(DeliveryLocationLog.objects.filter(delivery=self.delivery).count(), 0)
+
+    def test_p3_7_tracking_history_endpoint(self):
+        """P3-7: Owner/Driver can retrieve full tracking history and state timeline"""
+        self.client.force_authenticate(user=self.owner)
+        self.delivery.status = 'on_the_way'
+        self.delivery.current_lat = 12.9716
+        self.delivery.current_lng = 77.5946
+        self.delivery.save()
+
+        DeliveryLocationLog.objects.create(
+            delivery=self.delivery,
+            driver=self.driver1,
+            latitude=12.9716,
+            longitude=77.5946,
+            recorded_at=timezone.now(),
+        )
+        DeliveryStatusHistory.objects.create(
+            delivery=self.delivery,
+            from_status='picked_up',
+            to_status='on_the_way',
+            changed_by=self.driver1,
+            notes='En route to client'
+        )
+
+        res = self.client.get(f'/api/v1/deliveries/{self.delivery.id}/tracking-history/')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data['status'], 'on_the_way')
+        self.assertEqual(len(res.data['location_logs']), 1)
+        self.assertEqual(len(res.data['status_history']), 1)
+        self.assertEqual(res.data['driver']['name'], 'driver_del1')
+
+    def test_p3_8_history_filtering_completed_and_failed(self):
+        """P3-8: Driver can filter delivery history (delivered and failed only)"""
+        self.client.force_authenticate(user=self.driver1)
+        # currently assigned
+        res1 = self.client.get('/api/v1/deliveries/?status=history')
+        self.assertEqual(res1.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(res1.data), 0)
+
+        # change to delivered
+        self.delivery.status = 'delivered'
+        self.delivery.save()
+
+        res2 = self.client.get('/api/v1/deliveries/?status=history')
+        self.assertEqual(res2.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(res2.data), 1)
