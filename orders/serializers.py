@@ -1,7 +1,8 @@
 from rest_framework import serializers
 from decimal import Decimal
 from django.db import transaction
-from .models import Order, OrderItem, PriceOverrideRequest
+from django.utils import timezone
+from .models import Order, OrderItem, PriceOverrideRequest, RecurringOrder, RecurringOrderItem, RecurringOrderExecution
 from products.models import Product
 from products.serializers import ProductSerializer
 
@@ -174,3 +175,177 @@ class PriceOverrideRequestSerializer(serializers.ModelSerializer):
             'discount_amount', 'quantity', 'requested_by', 'requested_by_name',
             'reviewed_by', 'reviewed_by_name', 'decision_timestamp', 'created_at'
         ]
+
+
+class RecurringOrderItemSerializer(serializers.ModelSerializer):
+    product_name = serializers.CharField(source='product.name', read_only=True)
+    product_price = serializers.CharField(source='product.price', read_only=True)
+
+    class Meta:
+        model = RecurringOrderItem
+        fields = ['id', 'product', 'product_name', 'product_price', 'quantity']
+
+
+class RecurringOrderItemWriteSerializer(serializers.Serializer):
+    product_id = serializers.IntegerField()
+    quantity = serializers.IntegerField(min_value=1)
+
+
+class RecurringOrderSerializer(serializers.ModelSerializer):
+    items = RecurringOrderItemSerializer(many=True, read_only=True)
+    customer_name = serializers.SerializerMethodField()
+    customer_phone = serializers.SerializerMethodField()
+    delivery_partner_name = serializers.SerializerMethodField()
+    is_scheduled_today = serializers.SerializerMethodField()
+    today_order_generated = serializers.SerializerMethodField()
+    today_order_id = serializers.SerializerMethodField()
+
+    class Meta:
+        model = RecurringOrder
+        fields = [
+            'id', 'customer', 'customer_profile', 'customer_name', 'customer_phone',
+            'company', 'delivery_partner', 'delivery_partner_name',
+            'delivery_address', 'frequency', 'weekdays', 'is_paused', 'skipped_dates',
+            'notes', 'created_at', 'updated_at', 'items',
+            'is_scheduled_today', 'today_order_generated', 'today_order_id'
+        ]
+        read_only_fields = ['id', 'customer', 'created_at', 'updated_at']
+
+    def get_customer_name(self, obj):
+        if obj.customer_profile:
+            return obj.customer_profile.name
+        if obj.company:
+            return obj.company.name
+        return obj.customer.get_full_name() or obj.customer.username
+
+    def get_customer_phone(self, obj):
+        if obj.customer_profile:
+            return obj.customer_profile.phone
+        if obj.company:
+            return obj.company.phone
+        return getattr(getattr(obj.customer, 'profile', None), 'phone', '')
+
+    def get_delivery_partner_name(self, obj):
+        return obj.delivery_partner.name if obj.delivery_partner else None
+
+    def get_is_scheduled_today(self, obj):
+        return obj.is_scheduled_for_date(timezone.now().date())
+
+    def get_today_order_generated(self, obj):
+        today = timezone.now().date()
+        return obj.executions.filter(execution_date=today).exists()
+
+    def get_today_order_id(self, obj):
+        today = timezone.now().date()
+        exec_obj = obj.executions.filter(execution_date=today).first()
+        return exec_obj.order_id if exec_obj else None
+
+
+class RecurringOrderCreateUpdateSerializer(serializers.ModelSerializer):
+    customer_id = serializers.IntegerField(required=False, allow_null=True)
+    delivery_partner_id = serializers.IntegerField(required=False, allow_null=True)
+    items = RecurringOrderItemWriteSerializer(many=True, write_only=True)
+
+    class Meta:
+        model = RecurringOrder
+        fields = [
+            'id', 'customer_id', 'delivery_partner_id', 'delivery_address',
+            'frequency', 'weekdays', 'is_paused', 'notes', 'items'
+        ]
+
+    def validate_items(self, value):
+        if not value:
+            raise serializers.ValidationError("Recurring order must have at least one product item.")
+        return value
+
+    def create(self, validated_data):
+        items_data = validated_data.pop('items')
+        customer_id = validated_data.pop('customer_id', None)
+        partner_id = validated_data.pop('delivery_partner_id', None)
+        request_user = self.context['request'].user
+
+        customer_profile = None
+        target_user = request_user
+        if customer_id:
+            from billing.models import Customer
+            try:
+                customer_profile = Customer.objects.get(id=customer_id)
+            except Customer.DoesNotExist:
+                raise serializers.ValidationError({'customer_id': 'Customer does not exist.'})
+            # Link to customer's user account if present, else owner
+            from accounts.models import UserProfile
+            if customer_profile.phone:
+                p_user = UserProfile.objects.filter(phone=customer_profile.phone).first()
+                if p_user:
+                    target_user = p_user.user
+
+        delivery_partner = None
+        if partner_id:
+            from deliveries.models import DeliveryPartner
+            try:
+                delivery_partner = DeliveryPartner.objects.get(id=partner_id)
+            except DeliveryPartner.DoesNotExist:
+                raise serializers.ValidationError({'delivery_partner_id': 'Delivery partner does not exist.'})
+
+        delivery_address = validated_data.get('delivery_address') or (customer_profile.address if customer_profile else '') or 'Walk-in / Stalls'
+        validated_data['delivery_address'] = delivery_address
+
+        with transaction.atomic():
+            rec_order = RecurringOrder.objects.create(
+                customer=target_user,
+                customer_profile=customer_profile,
+                company=customer_profile.company if customer_profile else None,
+                delivery_partner=delivery_partner,
+                **validated_data
+            )
+
+            product_ids = [item['product_id'] for item in items_data]
+            products = {p.id: p for p in Product.objects.filter(id__in=product_ids)}
+
+            for item in items_data:
+                pid = item['product_id']
+                if pid not in products:
+                    raise serializers.ValidationError({'items': f"Product ID {pid} does not exist."})
+                RecurringOrderItem.objects.create(
+                    recurring_order=rec_order,
+                    product=products[pid],
+                    quantity=item['quantity']
+                )
+
+        return rec_order
+
+    def update(self, instance, validated_data):
+        items_data = validated_data.pop('items', None)
+        partner_id = validated_data.pop('delivery_partner_id', None)
+
+        if partner_id is not None:
+            if partner_id == 0 or partner_id == '':
+                instance.delivery_partner = None
+            else:
+                from deliveries.models import DeliveryPartner
+                try:
+                    instance.delivery_partner = DeliveryPartner.objects.get(id=partner_id)
+                except DeliveryPartner.DoesNotExist:
+                    raise serializers.ValidationError({'delivery_partner_id': 'Delivery partner does not exist.'})
+
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+
+        # Update items if provided (Future orders only - does not affect historical orders)
+        if items_data is not None:
+            with transaction.atomic():
+                instance.items.all().delete()
+                product_ids = [item['product_id'] for item in items_data]
+                products = {p.id: p for p in Product.objects.filter(id__in=product_ids)}
+                for item in items_data:
+                    pid = item['product_id']
+                    if pid not in products:
+                        raise serializers.ValidationError({'items': f"Product ID {pid} does not exist."})
+                    RecurringOrderItem.objects.create(
+                        recurring_order=instance,
+                        product=products[pid],
+                        quantity=item['quantity']
+                    )
+
+        return instance

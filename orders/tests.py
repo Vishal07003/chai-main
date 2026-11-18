@@ -118,3 +118,88 @@ class OrdersTests(TestCase):
         # 5. out_for_delivery -> delivered: Valid
         res4 = self.client.patch(f'/api/v1/orders/{order.id}/', {'status': 'delivered'}, format='json')
         self.assertEqual(res4.status_code, status.HTTP_200_OK)
+
+    def test_recurring_order_full_lifecycle_and_duplicate_prevention(self):
+        """Test recurring order creation, pause/resume, skip date, and duplicate prevention."""
+        from billing.models import Customer
+        from deliveries.models import DeliveryPartner
+        from orders.models import RecurringOrder, RecurringOrderExecution
+
+        # 1. Setup Customer and Driver
+        cust = Customer.objects.create(name='Recurring Ramesh', phone='9988776655', address='Tech Park Tower A')
+        driver_user = User.objects.create_user(username='driver_boy', password='Password123!')
+        UserProfile.objects.create(user=driver_user, phone='9988776611', role='delivery')
+        partner = DeliveryPartner.objects.create(name='Driver Boy', phone='9988776611', user=driver_user)
+
+        self.client.force_authenticate(user=self.owner)
+
+        # 2. Create Recurring Order
+        create_data = {
+            'customer_id': cust.id,
+            'delivery_partner_id': partner.id,
+            'delivery_address': 'Tech Park Tower A, Floor 3',
+            'frequency': 'daily',
+            'items': [
+                {'product_id': self.product1.id, 'quantity': 5},  # 15 * 5 = 75
+                {'product_id': self.product2.id, 'quantity': 2},  # 30 * 2 = 60 -> Total 135.00
+            ],
+            'notes': 'Daily 10 AM Chai',
+        }
+        res = self.client.post('/api/v1/orders/recurring/', create_data, format='json')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        rec_id = res.data['id']
+
+        # 3. Verify detail
+        rec_obj = RecurringOrder.objects.get(id=rec_id)
+        self.assertEqual(rec_obj.items.count(), 2)
+        self.assertEqual(rec_obj.delivery_partner, partner)
+        self.assertFalse(rec_obj.is_paused)
+
+        # 4. Generate Order for Today (First time -> 201 Created)
+        gen_res = self.client.post(f'/api/v1/orders/recurring/{rec_id}/generate-order/', {}, format='json')
+        self.assertEqual(gen_res.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(gen_res.data['success'])
+        order_id = gen_res.data['order']['id']
+
+        order = Order.objects.get(id=order_id)
+        self.assertEqual(order.total_amount, 135.00)
+        self.assertEqual(order.delivery.driver, driver_user)
+        self.assertFalse(order.has_invoice)  # Business rule: Never automatically create invoice
+
+        # 5. Duplicate Prevention: Attempt to generate for the same date again -> returns existing order
+        dup_res = self.client.post(f'/api/v1/orders/recurring/{rec_id}/generate-order/', {}, format='json')
+        self.assertEqual(dup_res.status_code, status.HTTP_200_OK)
+        self.assertTrue(dup_res.data.get('already_generated'))
+        self.assertEqual(dup_res.data['order']['id'], order_id)
+        self.assertEqual(Order.objects.filter(customer_profile=cust).count(), 1)
+
+        # 6. Pause & Resume
+        pause_res = self.client.post(f'/api/v1/orders/recurring/{rec_id}/pause/')
+        self.assertEqual(pause_res.status_code, status.HTTP_200_OK)
+        rec_obj.refresh_from_db()
+        self.assertTrue(rec_obj.is_paused)
+
+        resume_res = self.client.post(f'/api/v1/orders/recurring/{rec_id}/resume/')
+        self.assertEqual(resume_res.status_code, status.HTTP_200_OK)
+        rec_obj.refresh_from_db()
+        self.assertFalse(rec_obj.is_paused)
+
+        # 7. Skip Date
+        skip_res = self.client.post(f'/api/v1/orders/recurring/{rec_id}/skip-date/', {'date': '2026-11-20'}, format='json')
+        self.assertEqual(skip_res.status_code, status.HTTP_200_OK)
+        rec_obj.refresh_from_db()
+        self.assertIn('2026-11-20', rec_obj.skipped_dates)
+
+        # 8. Edit Template Future Quantities (Does not alter historical order #1)
+        update_data = {
+            'items': [
+                {'product_id': self.product1.id, 'quantity': 10},
+            ]
+        }
+        patch_res = self.client.patch(f'/api/v1/orders/recurring/{rec_id}/', update_data, format='json')
+        self.assertEqual(patch_res.status_code, status.HTTP_200_OK)
+
+        # Historical order #1 must still have 135.00 and 2 items
+        order.refresh_from_db()
+        self.assertEqual(order.total_amount, 135.00)
+        self.assertEqual(order.items.count(), 2)
