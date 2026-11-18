@@ -236,7 +236,7 @@ class CustomerViewSet(viewsets.ModelViewSet):
         invoices = customer.invoices.exclude(status='void')
         total_billed = invoices.aggregate(s=Sum('grand_total'))['s'] or Decimal('0.00')
         total_paid = customer.payments.aggregate(s=Sum('amount'))['s'] or Decimal('0.00')
-        pending = max(Decimal('0.00'), total_billed - total_paid)
+        pending = sum(inv.pending_amount for inv in invoices)
         last_invoice = invoices.order_by('-created_at').first()
 
         return Response({
@@ -476,9 +476,15 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         total_received = cash_received + online_received
 
         all_invoices = Invoice.objects.exclude(status='void')
-        total_billed = all_invoices.aggregate(s=Sum('grand_total'))['s'] or Decimal('0.00')
-        all_payments = Payment.objects.aggregate(s=Sum('amount'))['s'] or Decimal('0.00')
-        total_pending = max(Decimal('0.00'), total_billed - all_payments)
+        total_pending = sum(inv.pending_amount for inv in all_invoices)
+        
+        # Payment breakdown counts
+        paid_invoices_count = all_invoices.filter(status='paid').count()
+        partially_paid_invoices_count = all_invoices.filter(status='partially_paid').count()
+        unpaid_invoices_count = all_invoices.filter(status='unpaid').count()
+        
+        # Defaulters: count of customers with positive pending balance and genuinely overdue status
+        defaulters_count = sum(1 for c in Customer.objects.all() if any(inv.pending_amount > 0 and (timezone.now() - inv.created_at).days > 7 for inv in c.invoices.exclude(status='void')))
 
         return Response({
             'date': date_param,
@@ -490,4 +496,8 @@ class InvoiceViewSet(viewsets.ModelViewSet):
             'online_received': str(online_received),
             'invoices_count': invoices_count,
             'total_pending': str(total_pending),
+            'paid_invoices_count': paid_invoices_count,
+            'partially_paid_invoices_count': partially_paid_invoices_count,
+            'unpaid_invoices_count': unpaid_invoices_count,
+            'defaulters_count': defaulters_count,
         })

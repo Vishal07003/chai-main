@@ -194,3 +194,58 @@ class BillingTests(TestCase):
         }, format='json')
         self.assertEqual(res4.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('phone', res4.data)
+
+    def test_discount_and_payment_separation(self):
+        """
+        Verify distinct discount separation:
+        Subtotal: 125 (e.g. 5x20 tea + 1x25 snack -> adjust prices to 125)
+        Discount: 5.00 -> Grand Total: 120.00
+        Payment: 120.00 -> Status: 'paid', Pending: 0.00
+        """
+        item_product = Product.objects.create(name='Special Chai', category=self.category, price='125.00', is_available=True)
+
+        # 1. Discount = 5, Received = 120 -> Paid in Full
+        res1 = self.client.post('/api/v1/billing/invoices/', {
+            'items': [{'product_id': item_product.id, 'quantity': 1}],
+            'discount_amount': '5.00',
+            'initial_payment_amount': '120.00',
+            'initial_payment_method': 'cash',
+        }, format='json')
+        self.assertEqual(res1.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Decimal(res1.data['subtotal']), Decimal('125.00'))
+        self.assertEqual(Decimal(res1.data['discount_amount']), Decimal('5.00'))
+        self.assertEqual(Decimal(res1.data['grand_total']), Decimal('120.00'))
+        self.assertEqual(Decimal(res1.data['total_paid']), Decimal('120.00'))
+        self.assertEqual(Decimal(res1.data['pending_amount']), Decimal('0.00'))
+        self.assertEqual(res1.data['status'], 'paid')
+
+        # 2. Discount = 5, Received = 100 -> Partially Paid (Pending = 20)
+        res2 = self.client.post('/api/v1/billing/invoices/', {
+            'items': [{'product_id': item_product.id, 'quantity': 1}],
+            'discount_amount': '5.00',
+            'initial_payment_amount': '100.00',
+            'initial_payment_method': 'online',
+        }, format='json')
+        self.assertEqual(res2.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Decimal(res2.data['subtotal']), Decimal('125.00'))
+        self.assertEqual(Decimal(res2.data['discount_amount']), Decimal('5.00'))
+        self.assertEqual(Decimal(res2.data['grand_total']), Decimal('120.00'))
+        self.assertEqual(Decimal(res2.data['total_paid']), Decimal('100.00'))
+        self.assertEqual(Decimal(res2.data['pending_amount']), Decimal('20.00'))
+        self.assertEqual(res2.data['status'], 'partially_paid')
+
+        # 3. Discount cannot exceed subtotal
+        res3 = self.client.post('/api/v1/billing/invoices/', {
+            'items': [{'product_id': item_product.id, 'quantity': 1}],
+            'discount_amount': '150.00',
+        }, format='json')
+        self.assertEqual(res3.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('discount_amount', res3.data)
+
+        # 4. Negative discount rejected
+        res4 = self.client.post('/api/v1/billing/invoices/', {
+            'items': [{'product_id': item_product.id, 'quantity': 1}],
+            'discount_amount': '-10.00',
+        }, format='json')
+        self.assertEqual(res4.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('discount_amount', res4.data)

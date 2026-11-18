@@ -71,6 +71,8 @@ class CustomerSerializer(serializers.ModelSerializer):
     total_billed_amount = serializers.SerializerMethodField()
     total_paid_amount = serializers.SerializerMethodField()
     total_pending_amount = serializers.SerializerMethodField()
+    is_defaulter = serializers.SerializerMethodField()
+    has_overdue = serializers.SerializerMethodField()
     custom_prices = CustomerProductPriceSerializer(many=True, read_only=True)
 
     class Meta:
@@ -78,9 +80,10 @@ class CustomerSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'name', 'phone', 'address', 'created_at',
             'total_bills', 'total_billed_amount', 'total_paid_amount', 'total_pending_amount',
+            'is_defaulter', 'has_overdue',
             'custom_prices'
         ]
-        read_only_fields = ['id', 'created_at', 'total_bills', 'total_billed_amount', 'total_paid_amount', 'total_pending_amount', 'custom_prices']
+        read_only_fields = ['id', 'created_at', 'total_bills', 'total_billed_amount', 'total_paid_amount', 'total_pending_amount', 'is_defaulter', 'has_overdue', 'custom_prices']
 
     def validate_name(self, value):
         if not value or not value.strip():
@@ -120,6 +123,20 @@ class CustomerSerializer(serializers.ModelSerializer):
     def get_total_pending_amount(self, obj):
         pending = sum(inv.pending_amount for inv in obj.invoices.exclude(status='void').all())
         return str(pending)
+
+    def get_has_overdue(self, obj):
+        pending = Decimal(self.get_total_pending_amount(obj))
+        if pending <= Decimal('0.00'):
+            return False
+        # Overdue if has any pending invoice older than 7 days
+        now = timezone.now()
+        for inv in obj.invoices.exclude(status='void'):
+            if inv.pending_amount > Decimal('0.00') and (now - inv.created_at).days > 7:
+                return True
+        return False
+
+    def get_is_defaulter(self, obj):
+        return self.get_has_overdue(obj)
 
 
 class PaymentAllocationSerializer(serializers.ModelSerializer):
@@ -163,6 +180,7 @@ class InvoiceDetailSerializer(serializers.ModelSerializer):
     total_paid = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
     pending_amount = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
     company_name = serializers.CharField(source='company.name', read_only=True)
+    is_overdue = serializers.SerializerMethodField()
 
     class Meta:
         model = Invoice
@@ -170,12 +188,17 @@ class InvoiceDetailSerializer(serializers.ModelSerializer):
             'id', 'invoice_number', 'order', 'company', 'company_name',
             'customer', 'customer_name', 'customer_phone',
             'subtotal', 'discount_amount', 'grand_total', 'status', 'notes', 'created_at',
-            'items', 'payments', 'allocations', 'total_paid', 'pending_amount'
+            'items', 'payments', 'allocations', 'total_paid', 'pending_amount', 'is_overdue'
         ]
         read_only_fields = [
             'id', 'invoice_number', 'order', 'created_at', 'status',
-            'total_paid', 'pending_amount', 'company_name'
+            'total_paid', 'pending_amount', 'company_name', 'is_overdue'
         ]
+
+    def get_is_overdue(self, obj):
+        if obj.status == 'paid' or obj.pending_amount <= Decimal('0.00'):
+            return False
+        return (timezone.now() - obj.created_at).days > 7
 
 
 class InvoiceCreateItemSerializer(serializers.Serializer):
@@ -196,6 +219,9 @@ class InvoiceCreateSerializer(serializers.Serializer):
     customer_name = serializers.CharField(max_length=200, required=False, allow_blank=True)
     customer_phone = serializers.CharField(max_length=15, required=False, allow_blank=True)
     notes = serializers.CharField(required=False, allow_blank=True, default='')
+    discount_amount = serializers.DecimalField(
+        max_digits=10, decimal_places=2, required=False, default=Decimal('0.00')
+    )
     items = InvoiceCreateItemSerializer(many=True)
     
     # Optional upfront payment
@@ -211,11 +237,17 @@ class InvoiceCreateSerializer(serializers.Serializer):
             raise serializers.ValidationError("Invoice must contain at least one product.")
         return value
 
+    def validate_discount_amount(self, value):
+        if value is not None and value < Decimal('0.00'):
+            raise serializers.ValidationError("Discount amount cannot be negative.")
+        return value or Decimal('0.00')
+
     def create(self, validated_data):
         company_id = validated_data.get('company_id')
         customer_id = validated_data.get('customer_id')
         items_data = validated_data['items']
         notes = validated_data.get('notes', '')
+        discount_amount = validated_data.get('discount_amount', Decimal('0.00'))
         init_amount = validated_data.get('initial_payment_amount', Decimal('0.00'))
         init_method = validated_data.get('initial_payment_method', 'cash')
 
@@ -281,9 +313,15 @@ class InvoiceCreateSerializer(serializers.Serializer):
                     total_price=item_total,
                 )
 
+            if discount_amount > subtotal:
+                raise serializers.ValidationError({
+                    'discount_amount': f"Discount amount (₹{discount_amount}) cannot exceed subtotal (₹{subtotal})."
+                })
+
             invoice.subtotal = subtotal
-            invoice.grand_total = subtotal
-            invoice.save(update_fields=['subtotal', 'grand_total'])
+            invoice.discount_amount = discount_amount
+            invoice.grand_total = max(Decimal('0.00'), subtotal - discount_amount)
+            invoice.save(update_fields=['subtotal', 'discount_amount', 'grand_total'])
 
             # Record upfront payment if provided
             if init_amount > Decimal('0.00'):
