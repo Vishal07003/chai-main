@@ -68,7 +68,7 @@ class Customer(models.Model):
     - Preserves link to historical Company if migrated
     """
     name = models.CharField(max_length=200, db_index=True)
-    phone = models.CharField(max_length=15, db_index=True)
+    phone = models.CharField(max_length=15, blank=True, default='', db_index=True)
     address = models.TextField(blank=True, default='')
     company = models.ForeignKey('Company', on_delete=models.SET_NULL, null=True, blank=True, related_name='individual_contacts')
     created_at = models.DateTimeField(auto_now_add=True)

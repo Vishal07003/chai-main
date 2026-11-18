@@ -245,11 +245,26 @@ class CustomerViewSet(viewsets.ModelViewSet):
             'phone': customer.phone,
             'address': customer.address,
             'total_invoices': invoices.count(),
+            'total_orders': customer.customer_orders.count(),
             'total_billed': str(total_billed),
             'total_paid': str(total_paid),
             'total_pending': str(pending),
             'last_purchase_date': last_invoice.created_at.isoformat() if last_invoice else None,
         })
+
+    @action(detail=True, methods=['get'])
+    def ledger(self, request, pk=None):
+        """
+        Dynamically generates chronological financial passbook statement for the customer.
+        Params: ?year=YYYY&month=M (defaults to current month)
+        """
+        customer = self.get_object()
+        now = timezone.now()
+        year = int(request.query_params.get('year', now.year))
+        month = int(request.query_params.get('month', now.month))
+
+        statement = LedgerService.get_customer_statement(customer=customer, year=year, month=month)
+        return Response(statement)
 
     @action(detail=True, methods=['get'])
     def orders(self, request, pk=None):

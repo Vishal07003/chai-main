@@ -4,11 +4,13 @@ from rest_framework.response import Response
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from django.utils import timezone
 from decimal import Decimal
-from .models import Order, OrderItem, PriceOverrideRequest
+from .models import Order, OrderItem, PriceOverrideRequest, RecurringOrder, RecurringOrderItem, RecurringOrderExecution
 from .serializers import (
     OrderSerializer,
     OrderCreateSerializer,
     PriceOverrideRequestSerializer,
+    RecurringOrderSerializer,
+    RecurringOrderCreateUpdateSerializer,
 )
 from billing.invoicing_service import InvoicingService
 from billing.serializers import InvoiceDetailSerializer
@@ -49,10 +51,13 @@ class OrderViewSet(viewsets.ModelViewSet):
         if user.is_staff or user.is_superuser or (hasattr(user, 'profile') and user.profile.role == 'owner'):
             status_param = self.request.query_params.get('status')
             company_id = self.request.query_params.get('company')
+            customer_id = self.request.query_params.get('customer')
             if status_param:
                 queryset = queryset.filter(status=status_param)
             if company_id:
                 queryset = queryset.filter(company_id=company_id)
+            if customer_id:
+                queryset = queryset.filter(Q(customer_profile_id=customer_id) | Q(customer_id=customer_id))
             return queryset
 
         if hasattr(user, 'profile') and user.profile.role == 'delivery':
@@ -273,3 +278,192 @@ class PriceOverrideRequestViewSet(viewsets.ModelViewSet):
         override_request.save(update_fields=['status', 'reviewed_by', 'decision_timestamp', 'review_notes'])
 
         return Response(PriceOverrideRequestSerializer(override_request).data)
+
+
+class RecurringOrderViewSet(viewsets.ModelViewSet):
+    """
+    Recurring Orders Management:
+    - Template creation for regular customers (daily or specific weekdays)
+    - Pause / Resume recurring schedule
+    - Skip a specific date
+    - Generate today's actual Order with duplicate prevention
+    - Delivery partner assignment
+    - Template edits apply to future orders only
+    """
+    queryset = RecurringOrder.objects.select_related(
+        'customer', 'customer_profile', 'company', 'delivery_partner'
+    ).prefetch_related('items__product', 'executions').order_by('-created_at')
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_serializer_class(self):
+        if self.action in ('create', 'update', 'partial_update'):
+            return RecurringOrderCreateUpdateSerializer
+        return RecurringOrderSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        if not user or not user.is_authenticated:
+            return RecurringOrder.objects.none()
+
+        is_owner = user.is_staff or user.is_superuser or (hasattr(user, 'profile') and user.profile.role == 'owner')
+        qs = self.queryset
+        if not is_owner:
+            qs = qs.filter(customer=user)
+
+        # Filters: customer, is_paused
+        cust_id = self.request.query_params.get('customer')
+        if cust_id:
+            qs = qs.filter(customer_profile_id=cust_id)
+        is_paused = self.request.query_params.get('is_paused')
+        if is_paused is not None:
+            qs = qs.filter(is_paused=(is_paused.lower() in ('true', '1')))
+        return qs
+
+    @action(detail=True, methods=['post'], url_path='pause')
+    def pause(self, request, pk=None):
+        rec_order = self.get_object()
+        rec_order.is_paused = True
+        rec_order.save(update_fields=['is_paused'])
+        return Response({'status': 'paused', 'id': rec_order.id})
+
+    @action(detail=True, methods=['post'], url_path='resume')
+    def resume(self, request, pk=None):
+        rec_order = self.get_object()
+        rec_order.is_paused = False
+        rec_order.save(update_fields=['is_paused'])
+        return Response({'status': 'resumed', 'id': rec_order.id})
+
+    @action(detail=True, methods=['post'], url_path='skip-date')
+    def skip_date(self, request, pk=None):
+        """
+        Skip a specific date for this recurring order:
+        Body: { "date": "YYYY-MM-DD" }
+        """
+        rec_order = self.get_object()
+        date_str = request.data.get('date')
+        if not date_str:
+            date_str = timezone.now().date().isoformat()
+
+        dates = list(rec_order.skipped_dates or [])
+        if date_str not in dates:
+            dates.append(date_str)
+            rec_order.skipped_dates = dates
+            rec_order.save(update_fields=['skipped_dates'])
+        return Response({'status': 'skipped', 'date': date_str, 'skipped_dates': rec_order.skipped_dates})
+
+    @action(detail=True, methods=['post'], url_path='unskip-date')
+    def unskip_date(self, request, pk=None):
+        """
+        Remove a date from skipped dates:
+        Body: { "date": "YYYY-MM-DD" }
+        """
+        rec_order = self.get_object()
+        date_str = request.data.get('date')
+        if not date_str:
+            date_str = timezone.now().date().isoformat()
+
+        dates = [d for d in (rec_order.skipped_dates or []) if d != date_str]
+        rec_order.skipped_dates = dates
+        rec_order.save(update_fields=['skipped_dates'])
+        return Response({'status': 'unskipped', 'date': date_str, 'skipped_dates': rec_order.skipped_dates})
+
+    @action(detail=True, methods=['post'], url_path='generate-order')
+    def generate_order(self, request, pk=None):
+        """
+        Generates today's actual order from this template after Owner review.
+        - Strictly prevents duplicates for the same (recurring_order, execution_date).
+        - Resolves pricing via InvoicingService.resolve_item_unit_price.
+        - Automatically creates associated Delivery container with assigned delivery partner.
+        - Does NOT generate an invoice (invoice creation remains manual and owner initiated).
+        """
+        rec_order = self.get_object()
+        date_param = request.data.get('date')
+        if date_param:
+            import datetime
+            try:
+                target_date = datetime.date.fromisoformat(date_param)
+            except ValueError:
+                raise ValidationError({'date': 'Invalid date format. Expected YYYY-MM-DD.'})
+        else:
+            target_date = timezone.now().date()
+
+        # 1. Duplicate check
+        existing_exec = RecurringOrderExecution.objects.filter(
+            recurring_order=rec_order,
+            execution_date=target_date
+        ).select_related('order').first()
+
+        if existing_exec:
+            return Response({
+                'already_generated': True,
+                'message': f"Order #{existing_exec.order_id} has already been generated for {target_date}.",
+                'order': OrderSerializer(existing_exec.order).data
+            }, status=status.HTTP_200_OK)
+
+        # 2. Check items
+        items = rec_order.items.select_related('product').all()
+        if not items.exists():
+            raise ValidationError({'detail': 'Recurring order template has no items.'})
+
+        # 3. Create actual order atomically
+        from django.db import transaction
+        from billing.invoicing_service import InvoicingService
+        from deliveries.models import Delivery
+        from notifications.services import NotificationService
+
+        pricing_entity = rec_order.customer_profile or rec_order.company
+
+        with transaction.atomic():
+            total = Decimal('0.00')
+            order = Order.objects.create(
+                customer=rec_order.customer,
+                customer_profile=rec_order.customer_profile,
+                company=rec_order.company,
+                status='pending',
+                total_amount=Decimal('0.00'),
+                delivery_address=rec_order.delivery_address,
+                notes=rec_order.notes or f"Generated from Recurring Order #{rec_order.id}",
+            )
+
+            for it in items:
+                standard_rate = InvoicingService.resolve_item_unit_price(
+                    pricing_entity, it.product, it.quantity
+                )
+                OrderItem.objects.create(
+                    order=order,
+                    product=it.product,
+                    quantity=it.quantity,
+                    price=standard_rate
+                )
+                total += (standard_rate * it.quantity)
+
+            order.total_amount = total
+            order.save(update_fields=['total_amount'])
+
+            # Create delivery assignment
+            driver_user = rec_order.delivery_partner.user if (rec_order.delivery_partner and rec_order.delivery_partner.user) else None
+            delivery = Delivery.objects.create(
+                order=order,
+                driver=driver_user,
+                status='assigned'
+            )
+            if driver_user:
+                NotificationService.on_delivery_assigned(delivery)
+
+            # Record execution ledger for duplicate prevention
+            exec_record = RecurringOrderExecution.objects.create(
+                recurring_order=rec_order,
+                order=order,
+                execution_date=target_date
+            )
+
+            # Notify Owner of new order
+            NotificationService.on_order_created(order)
+
+        return Response({
+            'success': True,
+            'message': f"Order #{order.id} generated successfully for {target_date}.",
+            'order': OrderSerializer(order).data,
+            'execution_id': exec_record.id,
+        }, status=status.HTTP_201_CREATED)
+

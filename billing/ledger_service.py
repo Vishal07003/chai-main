@@ -172,3 +172,119 @@ class LedgerService:
             'transactions': timeline,
         }
 
+    @classmethod
+    def get_customer_statement(cls, customer, year: int, month: int) -> dict:
+        """
+        Calculate statement for a given Customer, year, and month.
+        Formula:
+          Opening Balance = Prior Debits - Prior Credits
+          Period Running Balance = Opening + Debits - Credits
+          Closing Balance = Period Running Balance at period end
+        """
+        _, last_day = calendar.monthrange(year, month)
+        start_date = date(year, month, 1)
+        end_date = date(year, month, last_day)
+
+        start_dt = timezone.make_aware(datetime.combine(start_date, time.min))
+        end_dt = timezone.make_aware(datetime.combine(end_date, time.max))
+
+        # --- 1. Opening Balance Calculation (< start_dt) ---
+        prior_invoiced = Invoice.objects.filter(
+            customer=customer,
+            created_at__lt=start_dt
+        ).exclude(status='void').aggregate(s=models.Sum('grand_total'))['s'] or Decimal('0.00')
+
+        prior_payments = Payment.objects.filter(
+            models.Q(customer=customer) | models.Q(invoice__customer=customer),
+            received_at__lt=start_dt
+        ).distinct().aggregate(s=models.Sum('amount'))['s'] or Decimal('0.00')
+
+        opening_balance = prior_invoiced - prior_payments
+
+        # --- 2. Period Events (Invoices & Payments) ---
+        events = []
+
+        period_invoices = Invoice.objects.filter(
+            customer=customer,
+            created_at__gte=start_dt,
+            created_at__lte=end_dt
+        ).exclude(status='void').order_by('created_at')
+
+        for inv in period_invoices:
+            events.append({
+                'timestamp': inv.created_at,
+                'type': 'INVOICE',
+                'reference_no': inv.invoice_number,
+                'description': f"Invoice #{inv.invoice_number}",
+                'debit': inv.grand_total,
+                'credit': Decimal('0.00'),
+                'entity_id': inv.id,
+            })
+
+        period_payments = Payment.objects.filter(
+            models.Q(customer=customer) | models.Q(invoice__customer=customer),
+            received_at__gte=start_dt,
+            received_at__lte=end_dt
+        ).distinct().order_by('received_at')
+
+        for pm in period_payments:
+            events.append({
+                'timestamp': pm.received_at,
+                'type': 'PAYMENT',
+                'reference_no': f"PAY-{pm.id:06d}",
+                'description': f"Payment via {pm.get_method_display()}" + (f" (Ref: {pm.reference_number})" if pm.reference_number else ""),
+                'debit': Decimal('0.00'),
+                'credit': pm.amount,
+                'entity_id': pm.id,
+            })
+
+        # --- 3. Sort Chronologically & Compute Running Balance ---
+        events.sort(key=lambda x: x['timestamp'])
+
+        running_balance = opening_balance
+        timeline = []
+        total_period_debit = Decimal('0.00')
+        total_period_credit = Decimal('0.00')
+
+        for ev in events:
+            debit = ev['debit']
+            credit = ev['credit']
+            running_balance += (debit - credit)
+            total_period_debit += debit
+            total_period_credit += credit
+
+            timeline.append({
+                'date': ev['timestamp'].isoformat(),
+                'type': ev['type'],
+                'reference_no': ev['reference_no'],
+                'description': ev['description'],
+                'debit': str(debit),
+                'credit': str(credit),
+                'running_balance': str(running_balance),
+                'entity_id': ev['entity_id'],
+            })
+
+        closing_balance = running_balance
+
+        return {
+            'customer': {
+                'id': customer.id,
+                'name': customer.name,
+                'phone': customer.phone,
+                'address': customer.address,
+            },
+            'period': {
+                'year': year,
+                'month': month,
+                'start_date': start_date.isoformat(),
+                'end_date': end_date.isoformat(),
+            },
+            'summary': {
+                'opening_balance': str(opening_balance),
+                'total_debit': str(total_period_debit),
+                'total_credit': str(total_period_credit),
+                'closing_balance': str(closing_balance),
+            },
+            'transactions': timeline,
+        }
+

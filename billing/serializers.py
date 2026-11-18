@@ -65,6 +65,8 @@ class CustomerProductPriceSerializer(serializers.ModelSerializer):
 
 
 class CustomerSerializer(serializers.ModelSerializer):
+    phone = serializers.CharField(required=False, allow_blank=True, default='')
+    address = serializers.CharField(required=False, allow_blank=True, default='')
     total_bills = serializers.SerializerMethodField()
     total_billed_amount = serializers.SerializerMethodField()
     total_paid_amount = serializers.SerializerMethodField()
@@ -79,6 +81,30 @@ class CustomerSerializer(serializers.ModelSerializer):
             'custom_prices'
         ]
         read_only_fields = ['id', 'created_at', 'total_bills', 'total_billed_amount', 'total_paid_amount', 'total_pending_amount', 'custom_prices']
+
+    def validate_name(self, value):
+        if not value or not value.strip():
+            raise serializers.ValidationError("Customer Name cannot be empty.")
+        return value.strip()
+
+    def validate_phone(self, value):
+        val = (value or '').strip()
+        if not val:
+            return ''
+        import re
+        cleaned = re.sub(r'\D', '', val)
+        if len(cleaned) == 12 and cleaned.startswith('91'):
+            cleaned = cleaned[2:]
+        if len(cleaned) != 10 or not cleaned[0] in '6789':
+            raise serializers.ValidationError("Please enter a valid 10-digit mobile number.")
+        
+        # Check duplicate only if phone is provided
+        qs = Customer.objects.filter(models.Q(phone=val) | models.Q(phone=cleaned) | models.Q(phone=f"+91{cleaned}"))
+        if self.instance:
+            qs = qs.exclude(id=self.instance.id)
+        if qs.exists():
+            raise serializers.ValidationError("A customer with this mobile number is already registered.")
+        return val
 
     def get_total_bills(self, obj):
         return obj.invoices.exclude(status='void').count()

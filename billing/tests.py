@@ -160,3 +160,37 @@ class BillingTests(TestCase):
         inv.refresh_from_db()
         self.assertEqual(inv.status, 'partially_paid')
         self.assertEqual(inv.pending_amount, Decimal('40.00'))
+
+    def test_customer_creation_validation(self):
+        """Customer creation: Name is required, phone & address are optional, duplicate phone rejected."""
+        # 1. Customer with name only (phone & address blank) -> SUCCESS
+        res1 = self.client.post('/api/v1/billing/customers/', {
+            'name': 'Customer Name Only',
+        }, format='json')
+        self.assertEqual(res1.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(res1.data['name'], 'Customer Name Only')
+        self.assertEqual(res1.data['phone'], '')
+
+        # 2. Customer with name and valid phone -> SUCCESS
+        res2 = self.client.post('/api/v1/billing/customers/', {
+            'name': 'Customer With Phone',
+            'phone': '9811223344',
+            'address': 'Shop 101, Main Road',
+        }, format='json')
+        self.assertEqual(res2.status_code, status.HTTP_201_CREATED)
+
+        # 3. Customer with invalid phone format -> 400
+        res3 = self.client.post('/api/v1/billing/customers/', {
+            'name': 'Bad Phone Customer',
+            'phone': '12345',
+        }, format='json')
+        self.assertEqual(res3.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('phone', res3.data)
+
+        # 4. Customer with duplicate phone -> 400
+        res4 = self.client.post('/api/v1/billing/customers/', {
+            'name': 'Duplicate Phone Customer',
+            'phone': '9811223344',
+        }, format='json')
+        self.assertEqual(res4.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('phone', res4.data)
