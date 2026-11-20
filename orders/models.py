@@ -101,7 +101,35 @@ class RecurringOrder(models.Model):
     weekdays = models.CharField(max_length=50, blank=True, default='', help_text="Comma-separated weekday numbers (0=Mon, 1=Tue, ..., 6=Sun)")
     is_paused = models.BooleanField(default=False, db_index=True)
     skipped_dates = models.JSONField(default=list, blank=True, help_text="List of ISO date strings YYYY-MM-DD to skip")
+    auto_approve = models.BooleanField(default=False, help_text="False = Owner Approval Required, True = Auto-Approve")
     notes = models.TextField(blank=True, default='')
+
+    # Notification & Timing Schedule (Phase 2A)
+    use_global_notification_settings = models.BooleanField(
+        default=True,
+        help_text="True = Inherit timings & toggles dynamically from Global Notification Settings"
+    )
+    custom_order_generation_time = models.TimeField(
+        null=True, blank=True,
+        help_text="Custom order generation time (e.g. 06:00:00). Used when use_global_notification_settings=False"
+    )
+    custom_owner_notification_time = models.TimeField(
+        null=True, blank=True,
+        help_text="Custom owner notification time (e.g. 06:05:00). Used when use_global_notification_settings=False"
+    )
+    custom_partner_notification_time = models.TimeField(
+        null=True, blank=True,
+        help_text="Custom delivery partner notification time (e.g. 06:10:00). Used when use_global_notification_settings=False"
+    )
+    owner_notification_enabled = models.BooleanField(
+        default=True,
+        help_text="Owner notification switch. If use_global=True, global setting overrides this"
+    )
+    partner_notification_enabled = models.BooleanField(
+        default=True,
+        help_text="Delivery partner notification switch. If use_global=True, global setting overrides this"
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -139,9 +167,10 @@ class RecurringOrderItem(models.Model):
     recurring_order = models.ForeignKey(RecurringOrder, on_delete=models.CASCADE, related_name='items')
     product = models.ForeignKey(Product, on_delete=models.CASCADE)
     quantity = models.PositiveIntegerField(default=1)
+    unit_price = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'), help_text="Agreed unit price snapshot")
 
     def __str__(self):
-        return f"{self.quantity}x {self.product.name} (Recurring #{self.recurring_order_id})"
+        return f"{self.quantity}x {self.product.name} @ ₹{self.unit_price} (Recurring #{self.recurring_order_id})"
 
 
 class RecurringOrderExecution(models.Model):
@@ -160,4 +189,57 @@ class RecurringOrderExecution(models.Model):
 
     def __str__(self):
         return f"Execution of #{self.recurring_order_id} on {self.execution_date} -> Order #{self.order_id}"
+
+
+class GlobalRecurringNotificationSetting(models.Model):
+    """
+    Singleton configuration for Global Recurring Order Generation & Notification Settings:
+    - Default Order Generation Time (default: 06:00:00)
+    - Default Owner Notification Time (default: 06:05:00)
+    - Default Delivery Partner Notification Time (default: 06:10:00)
+    - Owner Notification Enabled (default: True)
+    - Delivery Partner Notification Enabled (default: True)
+    - Timezone (default: Asia/Kolkata)
+    """
+    order_generation_time = models.TimeField(
+        default='06:00:00',
+        help_text="Default daily cutoff time to generate pending orders"
+    )
+    owner_notification_time = models.TimeField(
+        default='06:05:00',
+        help_text="Default daily time to notify business owners"
+    )
+    partner_notification_time = models.TimeField(
+        default='06:10:00',
+        help_text="Default daily time to notify assigned delivery partners"
+    )
+    owner_notification_enabled = models.BooleanField(
+        default=True,
+        help_text="Global master switch for owner notifications"
+    )
+    partner_notification_enabled = models.BooleanField(
+        default=True,
+        help_text="Global master switch for delivery partner notifications"
+    )
+    timezone = models.CharField(
+        max_length=50,
+        default='Asia/Kolkata',
+        help_text="Scheduling timezone"
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Global Recurring Notification Setting'
+        verbose_name_plural = 'Global Recurring Notification Settings'
+
+    def __str__(self):
+        return f"Global Recurring Notification Settings (Gen: {self.order_generation_time}, TZ: {self.timezone})"
+
+    @classmethod
+    def get_settings(cls):
+        """Returns the singleton instance, creating it if it doesn't exist."""
+        instance = cls.objects.first()
+        if not instance:
+            instance = cls.objects.create()
+        return instance
 

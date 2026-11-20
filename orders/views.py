@@ -426,16 +426,20 @@ class RecurringOrderViewSet(viewsets.ModelViewSet):
             )
 
             for it in items:
-                standard_rate = InvoicingService.resolve_item_unit_price(
-                    pricing_entity, it.product, it.quantity
-                )
+                # Use snapshot agreed unit price if specified on recurring template, otherwise resolve rate
+                if it.unit_price and it.unit_price > 0:
+                    order_item_price = it.unit_price
+                else:
+                    order_item_price = InvoicingService.resolve_item_unit_price(
+                        pricing_entity, it.product, it.quantity
+                    )
                 OrderItem.objects.create(
                     order=order,
                     product=it.product,
                     quantity=it.quantity,
-                    price=standard_rate
+                    price=order_item_price
                 )
-                total += (standard_rate * it.quantity)
+                total += (order_item_price * it.quantity)
 
             order.total_amount = total
             order.save(update_fields=['total_amount'])

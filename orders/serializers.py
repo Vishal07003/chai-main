@@ -2,7 +2,10 @@ from rest_framework import serializers
 from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
-from .models import Order, OrderItem, PriceOverrideRequest, RecurringOrder, RecurringOrderItem, RecurringOrderExecution
+from .models import (
+    Order, OrderItem, PriceOverrideRequest, RecurringOrder, RecurringOrderItem,
+    RecurringOrderExecution, GlobalRecurringNotificationSetting
+)
 from products.models import Product
 from products.serializers import ProductSerializer
 
@@ -237,12 +240,13 @@ class RecurringOrderItemSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = RecurringOrderItem
-        fields = ['id', 'product', 'product_name', 'product_price', 'quantity']
+        fields = ['id', 'product', 'product_name', 'product_price', 'quantity', 'unit_price']
 
 
 class RecurringOrderItemWriteSerializer(serializers.Serializer):
     product_id = serializers.IntegerField()
     quantity = serializers.IntegerField(min_value=1)
+    unit_price = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, allow_null=True)
 
 
 class RecurringOrderSerializer(serializers.ModelSerializer):
@@ -260,7 +264,7 @@ class RecurringOrderSerializer(serializers.ModelSerializer):
             'id', 'customer', 'customer_profile', 'customer_name', 'customer_phone',
             'company', 'delivery_partner', 'delivery_partner_name',
             'delivery_address', 'frequency', 'weekdays', 'is_paused', 'skipped_dates',
-            'notes', 'created_at', 'updated_at', 'items',
+            'auto_approve', 'notes', 'created_at', 'updated_at', 'items',
             'is_scheduled_today', 'today_order_generated', 'today_order_id'
         ]
         read_only_fields = ['id', 'customer', 'created_at', 'updated_at']
@@ -304,7 +308,7 @@ class RecurringOrderCreateUpdateSerializer(serializers.ModelSerializer):
         model = RecurringOrder
         fields = [
             'id', 'customer_id', 'delivery_partner_id', 'delivery_address',
-            'frequency', 'weekdays', 'is_paused', 'notes', 'items'
+            'frequency', 'weekdays', 'is_paused', 'auto_approve', 'notes', 'items'
         ]
 
     def validate_items(self, value):
@@ -360,10 +364,16 @@ class RecurringOrderCreateUpdateSerializer(serializers.ModelSerializer):
                 pid = item['product_id']
                 if pid not in products:
                     raise serializers.ValidationError({'items': f"Product ID {pid} does not exist."})
+                prod = products[pid]
+                item_unit_price = item.get('unit_price')
+                if item_unit_price is None or item_unit_price <= 0:
+                    item_unit_price = prod.price or Decimal('0.00')
+
                 RecurringOrderItem.objects.create(
                     recurring_order=rec_order,
-                    product=products[pid],
-                    quantity=item['quantity']
+                    product=prod,
+                    quantity=item['quantity'],
+                    unit_price=item_unit_price
                 )
 
         return rec_order
@@ -421,10 +431,16 @@ class RecurringOrderCreateUpdateSerializer(serializers.ModelSerializer):
                     pid = item['product_id']
                     if pid not in products:
                         raise serializers.ValidationError({'items': f"Product ID {pid} does not exist."})
+                    prod = products[pid]
+                    item_unit_price = item.get('unit_price')
+                    if item_unit_price is None or item_unit_price <= 0:
+                        item_unit_price = prod.price or Decimal('0.00')
+
                     RecurringOrderItem.objects.create(
                         recurring_order=instance,
-                        product=products[pid],
-                        quantity=item['quantity']
+                        product=prod,
+                        quantity=item['quantity'],
+                        unit_price=item_unit_price
                     )
 
         return instance
