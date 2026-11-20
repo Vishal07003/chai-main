@@ -404,18 +404,22 @@ class DraftInvoiceDetailSerializer(serializers.ModelSerializer):
     draft_orders = DraftInvoiceOrderSerializer(many=True, read_only=True)
     created_by_name = serializers.CharField(source='created_by.username', read_only=True)
     official_invoice_number = serializers.CharField(source='official_invoice.invoice_number', read_only=True)
+    delivery_partner_id = serializers.IntegerField(source='delivery_partner.id', read_only=True, allow_null=True)
+    delivery_partner_name = serializers.CharField(source='delivery_partner.name', read_only=True, allow_null=True)
 
     class Meta:
         model = DraftInvoice
         fields = [
             'id', 'draft_number', 'customer', 'customer_name', 'customer_phone',
             'billing_source', 'status', 'subtotal', 'discount_amount', 'grand_total',
-            'due_date', 'notes', 'expires_at', 'created_by', 'created_by_name',
+            'due_date', 'notes', 'delivery_partner', 'delivery_partner_id', 'delivery_partner_name',
+            'expires_at', 'created_by', 'created_by_name',
             'official_invoice', 'official_invoice_number', 'created_at', 'updated_at',
             'items', 'draft_orders'
         ]
         read_only_fields = [
             'id', 'draft_number', 'status', 'subtotal', 'grand_total',
+            'delivery_partner', 'delivery_partner_id', 'delivery_partner_name',
             'created_by', 'created_by_name', 'official_invoice', 'official_invoice_number',
             'created_at', 'updated_at'
         ]
@@ -431,6 +435,7 @@ class DraftInvoiceItemInputSerializer(serializers.Serializer):
 
 class DraftInvoiceCreateSerializer(serializers.Serializer):
     customer_id = serializers.IntegerField(required=False, allow_null=True)
+    delivery_partner_id = serializers.IntegerField(required=False, allow_null=True)
     billing_source = serializers.ChoiceField(
         choices=DraftInvoice.BILLING_SOURCE_CHOICES, default='quick_billing'
     )
@@ -443,6 +448,17 @@ class DraftInvoiceCreateSerializer(serializers.Serializer):
     )
     due_date = serializers.DateField(required=False, allow_null=True)
     notes = serializers.CharField(required=False, allow_blank=True, default='')
+
+    def validate_delivery_partner_id(self, value):
+        if value is not None:
+            from deliveries.models import DeliveryPartner
+            try:
+                partner = DeliveryPartner.objects.get(id=value)
+            except DeliveryPartner.DoesNotExist:
+                raise serializers.ValidationError("Delivery partner does not exist.")
+            if not partner.is_active:
+                raise serializers.ValidationError("Selected delivery partner is inactive.")
+        return value
 
     def validate(self, attrs):
         billing_source = attrs.get('billing_source', 'quick_billing')
@@ -464,6 +480,7 @@ class DraftInvoiceCreateSerializer(serializers.Serializer):
 
 class DraftInvoiceUpdateSerializer(serializers.Serializer):
     customer_id = serializers.IntegerField(required=False, allow_null=True)
+    delivery_partner_id = serializers.IntegerField(required=False, allow_null=True)
     items = DraftInvoiceItemInputSerializer(many=True, required=False)
     order_ids = serializers.ListField(
         child=serializers.IntegerField(), required=False
@@ -473,6 +490,17 @@ class DraftInvoiceUpdateSerializer(serializers.Serializer):
     )
     due_date = serializers.DateField(required=False, allow_null=True)
     notes = serializers.CharField(required=False, allow_blank=True)
+
+    def validate_delivery_partner_id(self, value):
+        if value is not None:
+            from deliveries.models import DeliveryPartner
+            try:
+                partner = DeliveryPartner.objects.get(id=value)
+            except DeliveryPartner.DoesNotExist:
+                raise serializers.ValidationError("Delivery partner does not exist.")
+            if not partner.is_active:
+                raise serializers.ValidationError("Selected delivery partner is inactive.")
+        return value
 
 
 class DraftFinalizeSerializer(serializers.Serializer):

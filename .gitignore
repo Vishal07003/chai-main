@@ -2,10 +2,9 @@
 __pycache__/
 *.pyc
 db.sqlite3
+*.sqlite3*
 media/
 staticfiles/
 .env
 *firebase*.json
 service-account*.json
-bd.sqlite3.backup_phase1
-.env.example

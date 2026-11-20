@@ -34,6 +34,7 @@ class DraftBillingService:
         order_ids: list = None,
         discount_amount=0,
         due_date=None,
+        delivery_partner=None,
         notes: str = '',
         created_by=None,
     ) -> DraftInvoice:
@@ -108,6 +109,7 @@ class DraftBillingService:
                 discount_amount=Decimal(str(discount_amount or 0)),
                 grand_total=Decimal('0.00'),
                 due_date=due_date,
+                delivery_partner=delivery_partner,
                 notes=notes,
                 created_by=created_by,
             )
@@ -175,6 +177,8 @@ class DraftBillingService:
         cls,
         draft: DraftInvoice,
         customer: Customer = None,
+        delivery_partner=None,
+        clear_delivery_partner: bool = False,
         items_data: list = None,
         order_ids: list = None,
         discount_amount=None,
@@ -205,6 +209,11 @@ class DraftBillingService:
 
             if due_date is not None:
                 locked_draft.due_date = due_date
+
+            if clear_delivery_partner:
+                locked_draft.delivery_partner = None
+            elif delivery_partner is not None:
+                locked_draft.delivery_partner = delivery_partner
 
             if notes is not None:
                 locked_draft.notes = notes

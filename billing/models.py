@@ -329,6 +329,14 @@ class DraftInvoice(models.Model):
 
     expires_at = models.DateTimeField(null=True, blank=True, help_text="Optional expiration for temporary order reservations")
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='created_draft_invoices')
+    delivery_partner = models.ForeignKey(
+        'deliveries.DeliveryPartner',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='draft_invoices',
+        help_text="Optional Delivery Partner selected for this draft"
+    )
     official_invoice = models.OneToOneField(
         Invoice,
         on_delete=models.SET_NULL,

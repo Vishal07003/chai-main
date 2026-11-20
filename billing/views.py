@@ -577,6 +577,12 @@ class DraftInvoiceViewSet(viewsets.ModelViewSet):
         customer_id = data.get('customer_id')
         customer = Customer.objects.filter(id=customer_id).first() if customer_id else None
 
+        partner_id = data.get('delivery_partner_id')
+        delivery_partner = None
+        if partner_id:
+            from deliveries.models import DeliveryPartner
+            delivery_partner = DeliveryPartner.objects.filter(id=partner_id).first()
+
         draft = DraftBillingService.create_draft(
             customer=customer,
             billing_source=data.get('billing_source', 'quick_billing'),
@@ -584,6 +590,7 @@ class DraftInvoiceViewSet(viewsets.ModelViewSet):
             order_ids=data.get('order_ids'),
             discount_amount=data.get('discount_amount', Decimal('0.00')),
             due_date=data.get('due_date'),
+            delivery_partner=delivery_partner,
             notes=data.get('notes', ''),
             created_by=request.user,
         )
@@ -599,9 +606,21 @@ class DraftInvoiceViewSet(viewsets.ModelViewSet):
         customer_id = data.get('customer_id')
         customer = Customer.objects.filter(id=customer_id).first() if customer_id is not None else None
 
+        delivery_partner = None
+        clear_delivery_partner = False
+        if 'delivery_partner_id' in data:
+            partner_id = data.get('delivery_partner_id')
+            if partner_id is None:
+                clear_delivery_partner = True
+            else:
+                from deliveries.models import DeliveryPartner
+                delivery_partner = DeliveryPartner.objects.filter(id=partner_id).first()
+
         updated_draft = DraftBillingService.update_draft(
             draft=draft,
             customer=customer if customer_id is not None else None,
+            delivery_partner=delivery_partner,
+            clear_delivery_partner=clear_delivery_partner,
             items_data=data.get('items'),
             order_ids=data.get('order_ids'),
             discount_amount=data.get('discount_amount'),
