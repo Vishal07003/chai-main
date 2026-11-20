@@ -49,9 +49,12 @@ class DeliveryViewSet(viewsets.ModelViewSet):
 
         if user.is_staff or user.is_superuser or (hasattr(user, 'profile') and user.profile.role == 'owner'):
             driver_id = self.request.query_params.get('driver')
+            order_id = self.request.query_params.get('order')
             status_param = self.request.query_params.get('status')
             if driver_id:
                 queryset = queryset.filter(driver_id=driver_id)
+            if order_id:
+                queryset = queryset.filter(order_id=order_id)
             if status_param:
                 if status_param == 'history':
                     queryset = queryset.filter(status__in=['delivered', 'failed'])
