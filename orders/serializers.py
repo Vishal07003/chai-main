@@ -23,17 +23,22 @@ class OrderItemWriteSerializer(serializers.Serializer):
 class OrderSerializer(serializers.ModelSerializer):
     items = OrderItemReadSerializer(many=True, read_only=True)
     customer_name = serializers.SerializerMethodField()
+    customer_phone = serializers.SerializerMethodField()
+    delivery_partner_id = serializers.SerializerMethodField()
+    delivery_partner_name = serializers.SerializerMethodField()
+    delivery_status = serializers.SerializerMethodField()
     has_invoice = serializers.BooleanField(read_only=True)
     invoice_number = serializers.SerializerMethodField()
 
     class Meta:
         model = Order
         fields = [
-            'id', 'customer', 'customer_profile', 'customer_name', 'company',
+            'id', 'customer', 'customer_profile', 'customer_name', 'customer_phone', 'company',
             'status', 'total_amount', 'delivery_address', 'notes',
+            'delivery_partner_id', 'delivery_partner_name', 'delivery_status',
             'has_invoice', 'invoice_number', 'created_at', 'updated_at', 'items'
         ]
-        read_only_fields = ['id', 'customer', 'customer_name', 'total_amount', 'has_invoice', 'invoice_number', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'customer', 'customer_name', 'customer_phone', 'delivery_partner_id', 'delivery_partner_name', 'delivery_status', 'total_amount', 'has_invoice', 'invoice_number', 'created_at', 'updated_at']
 
     def get_customer_name(self, obj):
         if obj.customer_profile:
@@ -41,6 +46,34 @@ class OrderSerializer(serializers.ModelSerializer):
         if obj.company:
             return obj.company.name
         return obj.customer.get_full_name() or obj.customer.username
+
+    def get_customer_phone(self, obj):
+        if obj.customer_profile and obj.customer_profile.phone:
+            return obj.customer_profile.phone
+        if obj.company and obj.company.phone:
+            return obj.company.phone
+        if hasattr(obj.customer, 'profile') and obj.customer.profile.phone:
+            return obj.customer.profile.phone
+        return ''
+
+    def get_delivery_partner_id(self, obj):
+        if hasattr(obj, 'delivery') and obj.delivery and obj.delivery.driver:
+            return obj.delivery.driver.id
+        return None
+
+    def get_delivery_partner_name(self, obj):
+        if hasattr(obj, 'delivery') and obj.delivery and obj.delivery.driver:
+            driver = obj.delivery.driver
+            if hasattr(driver, 'partner_profile') and driver.partner_profile:
+                return driver.partner_profile.name
+            full_name = f"{driver.first_name} {driver.last_name}".strip()
+            return full_name or driver.username
+        return None
+
+    def get_delivery_status(self, obj):
+        if hasattr(obj, 'delivery') and obj.delivery:
+            return obj.delivery.status
+        return None
 
     def get_invoice_number(self, obj):
         if hasattr(obj, 'invoice') and obj.invoice:
@@ -50,11 +83,12 @@ class OrderSerializer(serializers.ModelSerializer):
 class OrderCreateSerializer(serializers.ModelSerializer):
     customer_id = serializers.IntegerField(required=False, allow_null=True)
     company_id = serializers.IntegerField(required=False, allow_null=True)
+    delivery_partner_id = serializers.IntegerField(required=False, allow_null=True)
     items = OrderItemWriteSerializer(many=True, write_only=True)
 
     class Meta:
         model = Order
-        fields = ['id', 'customer_id', 'company_id', 'delivery_address', 'notes', 'items']
+        fields = ['id', 'customer_id', 'company_id', 'delivery_partner_id', 'delivery_address', 'notes', 'items']
 
     def validate_items(self, value):
         if not value:
@@ -65,6 +99,7 @@ class OrderCreateSerializer(serializers.ModelSerializer):
         items_data = validated_data.pop('items')
         customer_id = validated_data.pop('customer_id', None)
         company_id = validated_data.pop('company_id', None)
+        delivery_partner_id = validated_data.pop('delivery_partner_id', None)
         user = self.context['request'].user
 
         customer_profile = None
@@ -147,12 +182,31 @@ class OrderCreateSerializer(serializers.ModelSerializer):
             order.save(update_fields=['total_amount'])
 
             # Create initial delivery assignment container (without invoice generation)
-            from deliveries.models import Delivery
-            Delivery.objects.get_or_create(order=order)
+            from deliveries.models import Delivery, DeliveryPartner
+            driver_user = None
+            if delivery_partner_id:
+                try:
+                    partner = DeliveryPartner.objects.select_related('user').get(id=delivery_partner_id)
+                    driver_user = partner.user
+                except DeliveryPartner.DoesNotExist:
+                    pass
+
+            delivery, _ = Delivery.objects.get_or_create(
+                order=order,
+                defaults={
+                    'driver': driver_user,
+                    'status': 'assigned' if driver_user else 'assigned'
+                }
+            )
+            if driver_user and delivery.driver != driver_user:
+                delivery.driver = driver_user
+                delivery.save(update_fields=['driver'])
 
             # Trigger FCM notification to Owner
             from notifications.services import NotificationService
             NotificationService.on_order_created(order)
+            if driver_user:
+                NotificationService.on_delivery_assigned(delivery)
 
         return order
 
@@ -317,9 +371,10 @@ class RecurringOrderCreateUpdateSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         items_data = validated_data.pop('items', None)
         partner_id = validated_data.pop('delivery_partner_id', None)
+        customer_id = validated_data.pop('customer_id', None)
 
         if partner_id is not None:
-            if partner_id == 0 or partner_id == '':
+            if partner_id == 0 or partner_id == '' or partner_id is None:
                 instance.delivery_partner = None
             else:
                 from deliveries.models import DeliveryPartner
@@ -328,13 +383,37 @@ class RecurringOrderCreateUpdateSerializer(serializers.ModelSerializer):
                 except DeliveryPartner.DoesNotExist:
                     raise serializers.ValidationError({'delivery_partner_id': 'Delivery partner does not exist.'})
 
-        for attr, value in validated_data.items():
-            setattr(instance, attr, value)
-        instance.save()
+        if customer_id is not None:
+            if customer_id == 0 or customer_id == '':
+                instance.customer_profile = None
+                instance.company = None
+            else:
+                from billing.models import Customer
+                try:
+                    cust_obj = Customer.objects.get(id=customer_id)
+                    instance.customer_profile = cust_obj
+                    instance.company = cust_obj.company
+                    # Link to customer's user account if present, otherwise preserve existing or fallback to request user
+                    from accounts.models import UserProfile
+                    p_user = None
+                    if cust_obj.phone:
+                        p_user = UserProfile.objects.filter(phone=cust_obj.phone).first()
+                    if p_user and p_user.user:
+                        instance.customer = p_user.user
+                    elif not instance.customer_id:
+                        request_user = self.context.get('request').user if self.context.get('request') else None
+                        if request_user and request_user.is_authenticated:
+                            instance.customer = request_user
+                except Customer.DoesNotExist:
+                    raise serializers.ValidationError({'customer_id': 'Customer does not exist.'})
 
-        # Update items if provided (Future orders only - does not affect historical orders)
-        if items_data is not None:
-            with transaction.atomic():
+        with transaction.atomic():
+            for attr, value in validated_data.items():
+                setattr(instance, attr, value)
+            instance.save()
+
+            # Update items if provided (Future orders only - does not affect historical orders)
+            if items_data is not None:
                 instance.items.all().delete()
                 product_ids = [item['product_id'] for item in items_data]
                 products = {p.id: p for p in Product.objects.filter(id__in=product_ids)}
