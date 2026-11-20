@@ -439,9 +439,9 @@ class DraftBillingService:
             notes=f"Assigned upon finalization of Quick Billing Invoice #{official_invoice.invoice_number}"
         )
 
-        # 8. Dispatch notification via transaction.on_commit
+        # 8. Dispatch notification (NotificationService.on_delivery_assigned itself wraps FCM/SMS dispatch inside transaction.on_commit)
         if driver_user:
-            transaction.on_commit(lambda: NotificationService.on_delivery_assigned(delivery))
+            NotificationService.on_delivery_assigned(delivery)
 
         return order
 
