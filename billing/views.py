@@ -486,6 +486,11 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         # Defaulters: count of customers with positive pending balance and genuinely overdue status
         defaulters_count = sum(1 for c in Customer.objects.all() if any(inv.pending_amount > 0 and (timezone.now() - inv.created_at).days > 7 for inv in c.invoices.exclude(status='void')))
 
+        # Orders metrics
+        from orders.models import Order
+        today_orders_count = Order.objects.filter(created_at__date=date_param).count()
+        pending_orders_count = Order.objects.filter(status='pending').count()
+
         return Response({
             'date': date_param,
             'today_sales': str(total_sales),
@@ -495,6 +500,8 @@ class InvoiceViewSet(viewsets.ModelViewSet):
             'cash_received': str(cash_received),
             'online_received': str(online_received),
             'invoices_count': invoices_count,
+            'today_orders_count': today_orders_count,
+            'pending_orders_count': pending_orders_count,
             'total_pending': str(total_pending),
             'paid_invoices_count': paid_invoices_count,
             'partially_paid_invoices_count': partially_paid_invoices_count,

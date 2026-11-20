@@ -78,9 +78,17 @@ class InvoicingService:
             customer_phone = customer.phone if customer else (company.phone if company else (getattr(locked_order.customer.profile, 'phone', '') if hasattr(locked_order.customer, 'profile') else ''))
 
             date_str = timezone.now().strftime('%Y%m%d')
-            # Generate unique invoice number
-            last_inv = Invoice.objects.filter(invoice_number__startswith=f"INV-{date_str}").count()
-            invoice_number = f"INV-{date_str}-{(last_inv + 1):04d}"
+            # Generate unique invoice number by finding max suffix
+            today_invoices = Invoice.objects.filter(invoice_number__startswith=f"INV-{date_str}-")
+            max_num = 0
+            for ti in today_invoices:
+                try:
+                    num_part = int(ti.invoice_number.split('-')[-1])
+                    if num_part > max_num:
+                        max_num = num_part
+                except (ValueError, IndexError):
+                    pass
+            invoice_number = f"INV-{date_str}-{(max_num + 1):04d}"
 
             invoice = Invoice.objects.create(
                 invoice_number=invoice_number,

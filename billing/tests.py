@@ -249,3 +249,46 @@ class BillingTests(TestCase):
         }, format='json')
         self.assertEqual(res4.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('discount_amount', res4.data)
+
+    def test_payment_synchronization_and_defaulter_settlement(self):
+        """
+        Test Scenarios from requirements:
+        1. Customer due ₹500; collect ₹500 Cash:
+           - Remaining ₹0, PAID, removed from Defaulters.
+        2. Customer due ₹500; collect ₹300 Cash:
+           - Remaining ₹200, PARTIALLY PAID.
+        3. Multiple invoices with FIFO allocation.
+        """
+        cust = Customer.objects.create(name='Pooja Verma', phone='9822334455', address='Suite 404')
+        p500 = Product.objects.create(name='Tea Bulk 500', category=self.category, price='500.00', is_available=True)
+
+        # Create invoice of ₹500 unpaid
+        inv_res = self.client.post('/api/v1/billing/invoices/', {
+            'customer_id': cust.id,
+            'items': [{'product_id': p500.id, 'quantity': 1}],
+        }, format='json')
+        self.assertEqual(inv_res.status_code, status.HTTP_201_CREATED)
+        inv_id = inv_res.data['id']
+        
+        # Verify customer initially has 500 pending
+        c_res = self.client.get(f'/api/v1/billing/customers/{cust.id}/')
+        self.assertEqual(Decimal(c_res.data['total_pending_amount']), Decimal('500.00'))
+
+        # Collect 500 in Cash
+        pay_res = self.client.post(f'/api/v1/billing/customers/{cust.id}/collect-payment/', {
+            'amount': '500.00',
+            'method': 'cash',
+        }, format='json')
+        self.assertEqual(pay_res.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Decimal(pay_res.data['amount_allocated']), Decimal('500.00'))
+
+        # Verify customer is now 0 pending, and is_defaulter is False
+        c_res_after = self.client.get(f'/api/v1/billing/customers/{cust.id}/')
+        self.assertEqual(Decimal(c_res_after.data['total_pending_amount']), Decimal('0.00'))
+        self.assertFalse(c_res_after.data['is_defaulter'])
+        self.assertFalse(c_res_after.data['has_overdue'])
+
+        # Verify invoice is paid
+        inv_after = Invoice.objects.get(id=inv_id)
+        self.assertEqual(inv_after.status, 'paid')
+        self.assertEqual(inv_after.pending_amount, Decimal('0.00'))

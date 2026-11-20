@@ -270,8 +270,16 @@ class InvoiceCreateSerializer(serializers.Serializer):
 
         with transaction.atomic():
             today_str = timezone.now().strftime('%Y%m%d')
-            count_today = Invoice.objects.filter(created_at__date=timezone.now().date()).count() + 1
-            inv_number = f"INV-{today_str}-{count_today:04d}"
+            today_invoices = Invoice.objects.filter(invoice_number__startswith=f"INV-{today_str}-")
+            max_num = 0
+            for ti in today_invoices:
+                try:
+                    num_part = int(ti.invoice_number.split('-')[-1])
+                    if num_part > max_num:
+                        max_num = num_part
+                except (ValueError, IndexError):
+                    pass
+            inv_number = f"INV-{today_str}-{(max_num + 1):04d}"
 
             invoice = Invoice.objects.create(
                 invoice_number=inv_number,
