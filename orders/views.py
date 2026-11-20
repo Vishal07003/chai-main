@@ -4,13 +4,17 @@ from rest_framework.response import Response
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from django.utils import timezone
 from decimal import Decimal
-from .models import Order, OrderItem, PriceOverrideRequest, RecurringOrder, RecurringOrderItem, RecurringOrderExecution
+from .models import (
+    Order, OrderItem, PriceOverrideRequest, RecurringOrder, RecurringOrderItem,
+    RecurringOrderExecution, GlobalRecurringNotificationSetting
+)
 from .serializers import (
     OrderSerializer,
     OrderCreateSerializer,
     PriceOverrideRequestSerializer,
     RecurringOrderSerializer,
     RecurringOrderCreateUpdateSerializer,
+    GlobalRecurringNotificationSettingSerializer,
 )
 from billing.invoicing_service import InvoicingService
 from billing.serializers import InvoiceDetailSerializer
@@ -470,4 +474,32 @@ class RecurringOrderViewSet(viewsets.ModelViewSet):
             'order': OrderSerializer(order).data,
             'execution_id': exec_record.id,
         }, status=status.HTTP_201_CREATED)
+
+
+class GlobalRecurringNotificationSettingViewSet(viewsets.ViewSet):
+    """
+    Singleton API for Global Recurring Notification Settings (Phase 2A):
+    - GET: Retrieve current global settings (Order generation time, Owner & Partner notification times, switches, timezone)
+    - PATCH / PUT: Update global settings with strict owner validation & time hierarchy checking
+    - Only authorized business owners or staff can view/modify
+    """
+    permission_classes = [permissions.IsAuthenticated, IsOwnerUser]
+
+    def list(self, request):
+        settings_obj = GlobalRecurringNotificationSetting.get_settings()
+        serializer = GlobalRecurringNotificationSettingSerializer(settings_obj)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def partial_update(self, request, pk=None):
+        settings_obj = GlobalRecurringNotificationSetting.get_settings()
+        serializer = GlobalRecurringNotificationSettingSerializer(
+            settings_obj, data=request.data, partial=True
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def update(self, request, pk=None):
+        return self.partial_update(request, pk)
+
 

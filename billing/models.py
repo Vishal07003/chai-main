@@ -126,6 +126,8 @@ class Invoice(models.Model):
     grand_total = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='unpaid')
     notes = models.TextField(blank=True, default='')
+    due_date = models.DateField(null=True, blank=True, help_text="Payment due date for this invoice")
+    finalized_at = models.DateTimeField(null=True, blank=True, help_text="Timestamp when invoice was officially finalized")
     generated_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='generated_invoices')
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
@@ -260,3 +262,146 @@ class LedgerAdjustment(models.Model):
 
     def __str__(self):
         return f"{self.adjustment_type} ₹{self.amount} for {self.company.name} ({self.reason[:30]})"
+
+
+class InvoiceOrder(models.Model):
+    """
+    Consolidated Billing Linking Model (Phase 1):
+    - Links multiple verified orders into one official Invoice.
+    - An order can belong to AT MOST ONE official invoice across both legacy and new models.
+    - Quick Billing invoices have zero InvoiceOrder records.
+    """
+    invoice = models.ForeignKey(Invoice, on_delete=models.CASCADE, related_name='invoice_orders')
+    order = models.OneToOneField(
+        'orders.Order',
+        on_delete=models.PROTECT,
+        related_name='order_billing',
+        help_text="One order can belong to only one official invoice."
+    )
+    consolidated_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-consolidated_at']
+        indexes = [
+            models.Index(fields=['invoice', 'order']),
+        ]
+
+    def __str__(self):
+        return f"Order #{self.order_id} attached to {self.invoice.invoice_number}"
+
+
+class DraftInvoice(models.Model):
+    """
+    Draft Invoice Model (Phase 1 Draft Billing Architecture):
+    - Separate from official financial Invoice records.
+    - Never mutates official sales, collections, or customer ledgers while in draft status.
+    - Editable products, quantities, rates, discounts, custom due dates.
+    - Supports multiple billing sources: Quick Billing, Single Order, Consolidated Orders, Recurring.
+    """
+    BILLING_SOURCE_CHOICES = (
+        ('quick_billing', 'Quick Billing'),
+        ('single_order', 'Single Order Billing'),
+        ('consolidated_orders', 'Consolidated Orders Billing'),
+        ('recurring', 'Recurring Order Billing'),
+    )
+
+    STATUS_CHOICES = (
+        ('draft', 'Draft (Active)'),
+        ('finalized', 'Finalized into Official Invoice'),
+        ('cancelled', 'Cancelled / Discarded'),
+    )
+
+    draft_number = models.CharField(
+        max_length=50,
+        unique=True,
+        db_index=True,
+        help_text="Unique draft reference (e.g. DRAFT-YYYYMMDD-XXXX), strictly distinct from official invoice numbers"
+    )
+    customer = models.ForeignKey(Customer, on_delete=models.SET_NULL, null=True, blank=True, related_name='draft_invoices')
+    customer_name = models.CharField(max_length=200, default='Walk-in Customer')
+    customer_phone = models.CharField(max_length=15, blank=True, default='')
+    billing_source = models.CharField(max_length=30, choices=BILLING_SOURCE_CHOICES, default='quick_billing')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft', db_index=True)
+
+    subtotal = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    discount_amount = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    grand_total = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    due_date = models.DateField(null=True, blank=True, help_text="Configurable payment due date for the draft")
+    notes = models.TextField(blank=True, default='')
+
+    expires_at = models.DateTimeField(null=True, blank=True, help_text="Optional expiration for temporary order reservations")
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='created_draft_invoices')
+    official_invoice = models.OneToOneField(
+        Invoice,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='source_draft',
+        help_text="Reference to official invoice once finalized"
+    )
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.draft_number} - {self.customer_name} [{self.get_billing_source_display()}] ({self.status})"
+
+    @classmethod
+    def generate_draft_number(cls):
+        date_str = timezone.now().strftime('%Y%m%d')
+        today_drafts = cls.objects.filter(draft_number__startswith=f"DRAFT-{date_str}-")
+        max_num = 0
+        for td in today_drafts:
+            try:
+                num_part = int(td.draft_number.split('-')[-1])
+                if num_part > max_num:
+                    max_num = num_part
+            except (ValueError, IndexError):
+                pass
+        return f"DRAFT-{date_str}-{(max_num + 1):04d}"
+
+
+class DraftInvoiceItem(models.Model):
+    """
+    Draft Line Item:
+    - Independent snapshots; edits do NOT alter original products, OrderItems, or historical InvoiceItems.
+    """
+    draft = models.ForeignKey(DraftInvoice, on_delete=models.CASCADE, related_name='items')
+    product = models.ForeignKey('products.Product', on_delete=models.SET_NULL, null=True, blank=True)
+    product_name = models.CharField(max_length=200)
+    unit = models.CharField(max_length=50, blank=True, default='Pc')
+    quantity = models.PositiveIntegerField(default=1)
+    unit_price = models.DecimalField(max_digits=10, decimal_places=2)
+    total_price = models.DecimalField(max_digits=10, decimal_places=2)
+
+    def __str__(self):
+        return f"{self.quantity}x {self.product_name} in {self.draft.draft_number}"
+
+
+class DraftInvoiceOrder(models.Model):
+    """
+    Order Reservation in Draft Billing:
+    - Links one draft to one or more verified orders of the same customer.
+    - An order cannot be attached to multiple active drafts.
+    - Cancelling a draft releases its reserved orders.
+    """
+    draft = models.ForeignKey(DraftInvoice, on_delete=models.CASCADE, related_name='draft_orders')
+    order = models.ForeignKey(
+        'orders.Order',
+        on_delete=models.CASCADE,
+        related_name='draft_reservations',
+        help_text="Order reserved in this draft invoice"
+    )
+    reserved_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-reserved_at']
+        indexes = [
+            models.Index(fields=['draft', 'order']),
+        ]
+
+    def __str__(self):
+        return f"Order #{self.order_id} reserved in {self.draft.draft_number}"
+

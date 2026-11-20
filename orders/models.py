@@ -32,7 +32,20 @@ class Order(models.Model):
 
     @property
     def has_invoice(self) -> bool:
-        return hasattr(self, 'invoice') and self.invoice is not None
+        if hasattr(self, 'invoice') and self.invoice is not None:
+            return True
+        if hasattr(self, 'order_billing') and self.order_billing is not None:
+            return True
+        return False
+
+    @property
+    def official_invoice(self):
+        """Returns the attached official invoice via legacy or InvoiceOrder consolidation link."""
+        if hasattr(self, 'invoice') and self.invoice is not None:
+            return self.invoice
+        if hasattr(self, 'order_billing') and self.order_billing is not None:
+            return self.order_billing.invoice
+        return None
 
 
 class OrderItem(models.Model):

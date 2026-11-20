@@ -249,6 +249,42 @@ class RecurringOrderItemWriteSerializer(serializers.Serializer):
     unit_price = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, allow_null=True)
 
 
+class GlobalRecurringNotificationSettingSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = GlobalRecurringNotificationSetting
+        fields = [
+            'id', 'order_generation_time', 'owner_notification_time', 'partner_notification_time',
+            'owner_notification_enabled', 'partner_notification_enabled', 'timezone', 'updated_at'
+        ]
+        read_only_fields = ['id', 'updated_at']
+
+    def validate(self, attrs):
+        instance = getattr(self, 'instance', None)
+        gen_time = attrs.get('order_generation_time', getattr(instance, 'order_generation_time', None))
+        owner_time = attrs.get('owner_notification_time', getattr(instance, 'owner_notification_time', None))
+        partner_time = attrs.get('partner_notification_time', getattr(instance, 'partner_notification_time', None))
+
+        if gen_time and owner_time and owner_time < gen_time:
+            raise serializers.ValidationError({
+                'owner_notification_time': 'Owner notification time cannot be earlier than order generation time.'
+            })
+
+        if gen_time and partner_time and partner_time < gen_time:
+            raise serializers.ValidationError({
+                'partner_notification_time': 'Delivery partner notification time cannot be earlier than order generation time.'
+            })
+
+        tz_val = attrs.get('timezone', getattr(instance, 'timezone', None))
+        if tz_val:
+            import zoneinfo
+            try:
+                zoneinfo.ZoneInfo(tz_val)
+            except Exception:
+                raise serializers.ValidationError({'timezone': f"Invalid timezone '{tz_val}'."})
+
+        return attrs
+
+
 class RecurringOrderSerializer(serializers.ModelSerializer):
     items = RecurringOrderItemSerializer(many=True, read_only=True)
     customer_name = serializers.SerializerMethodField()
@@ -257,6 +293,7 @@ class RecurringOrderSerializer(serializers.ModelSerializer):
     is_scheduled_today = serializers.SerializerMethodField()
     today_order_generated = serializers.SerializerMethodField()
     today_order_id = serializers.SerializerMethodField()
+    effective_notification_schedule = serializers.SerializerMethodField()
 
     class Meta:
         model = RecurringOrder
@@ -265,9 +302,36 @@ class RecurringOrderSerializer(serializers.ModelSerializer):
             'company', 'delivery_partner', 'delivery_partner_name',
             'delivery_address', 'frequency', 'weekdays', 'is_paused', 'skipped_dates',
             'auto_approve', 'notes', 'created_at', 'updated_at', 'items',
-            'is_scheduled_today', 'today_order_generated', 'today_order_id'
+            'is_scheduled_today', 'today_order_generated', 'today_order_id',
+            'use_global_notification_settings', 'custom_order_generation_time',
+            'custom_owner_notification_time', 'custom_partner_notification_time',
+            'owner_notification_enabled', 'partner_notification_enabled',
+            'effective_notification_schedule'
         ]
-        read_only_fields = ['id', 'customer', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'customer', 'created_at', 'updated_at', 'effective_notification_schedule']
+
+    def get_effective_notification_schedule(self, obj):
+        global_settings = GlobalRecurringNotificationSetting.get_settings()
+        if obj.use_global_notification_settings:
+            return {
+                'is_custom': False,
+                'order_generation_time': str(global_settings.order_generation_time),
+                'owner_notification_time': str(global_settings.owner_notification_time),
+                'partner_notification_time': str(global_settings.partner_notification_time),
+                'owner_notification_enabled': global_settings.owner_notification_enabled,
+                'partner_notification_enabled': global_settings.partner_notification_enabled,
+                'timezone': global_settings.timezone,
+            }
+        else:
+            return {
+                'is_custom': True,
+                'order_generation_time': str(obj.custom_order_generation_time) if obj.custom_order_generation_time else str(global_settings.order_generation_time),
+                'owner_notification_time': str(obj.custom_owner_notification_time) if obj.custom_owner_notification_time else str(global_settings.owner_notification_time),
+                'partner_notification_time': str(obj.custom_partner_notification_time) if obj.custom_partner_notification_time else str(global_settings.partner_notification_time),
+                'owner_notification_enabled': obj.owner_notification_enabled,
+                'partner_notification_enabled': obj.partner_notification_enabled,
+                'timezone': global_settings.timezone,
+            }
 
     def get_customer_name(self, obj):
         if obj.customer_profile:
@@ -308,8 +372,53 @@ class RecurringOrderCreateUpdateSerializer(serializers.ModelSerializer):
         model = RecurringOrder
         fields = [
             'id', 'customer_id', 'delivery_partner_id', 'delivery_address',
-            'frequency', 'weekdays', 'is_paused', 'auto_approve', 'notes', 'items'
+            'frequency', 'weekdays', 'is_paused', 'auto_approve', 'notes', 'items',
+            'use_global_notification_settings', 'custom_order_generation_time',
+            'custom_owner_notification_time', 'custom_partner_notification_time',
+            'owner_notification_enabled', 'partner_notification_enabled'
         ]
+
+    def validate(self, attrs):
+        use_global = attrs.get(
+            'use_global_notification_settings',
+            getattr(self.instance, 'use_global_notification_settings', True) if self.instance else True
+        )
+        if not use_global:
+            gen_time = attrs.get(
+                'custom_order_generation_time',
+                getattr(self.instance, 'custom_order_generation_time', None) if self.instance else None
+            )
+            owner_time = attrs.get(
+                'custom_owner_notification_time',
+                getattr(self.instance, 'custom_owner_notification_time', None) if self.instance else None
+            )
+            partner_time = attrs.get(
+                'custom_partner_notification_time',
+                getattr(self.instance, 'custom_partner_notification_time', None) if self.instance else None
+            )
+
+            if not gen_time:
+                raise serializers.ValidationError({
+                    'custom_order_generation_time': 'Order generation time is required when custom notification schedule is enabled.'
+                })
+            if not owner_time:
+                raise serializers.ValidationError({
+                    'custom_owner_notification_time': 'Owner notification time is required when custom notification schedule is enabled.'
+                })
+            if not partner_time:
+                raise serializers.ValidationError({
+                    'custom_partner_notification_time': 'Delivery partner notification time is required when custom notification schedule is enabled.'
+                })
+
+            if gen_time and owner_time and owner_time < gen_time:
+                raise serializers.ValidationError({
+                    'custom_owner_notification_time': 'Owner notification time cannot be earlier than order generation time.'
+                })
+            if gen_time and partner_time and partner_time < gen_time:
+                raise serializers.ValidationError({
+                    'custom_partner_notification_time': 'Delivery partner notification time cannot be earlier than order generation time.'
+                })
+        return attrs
 
     def validate_items(self, value):
         if not value:

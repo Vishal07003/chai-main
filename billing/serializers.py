@@ -2,7 +2,11 @@ from rest_framework import serializers
 from decimal import Decimal
 from django.db import transaction, models
 from django.utils import timezone
-from .models import Company, CompanyProductPrice, Customer, CustomerProductPrice, Invoice, InvoiceItem, Payment, PaymentAllocation, LedgerAdjustment
+from .models import (
+    Company, CompanyProductPrice, Customer, CustomerProductPrice,
+    Invoice, InvoiceItem, Payment, PaymentAllocation, LedgerAdjustment,
+    InvoiceOrder, DraftInvoice, DraftInvoiceItem, DraftInvoiceOrder
+)
 from products.models import Product
 
 class CompanyProductPriceSerializer(serializers.ModelSerializer):
@@ -367,3 +371,109 @@ class LedgerAdjustmentSerializer(serializers.ModelSerializer):
             'approved_by', 'approved_by_name', 'created_at'
         ]
         read_only_fields = ['id', 'approved_by', 'approved_by_name', 'created_at']
+
+
+# --------------------------------------------------------------------------
+# Phase 2: Draft Billing Serializers
+# --------------------------------------------------------------------------
+
+class DraftInvoiceItemSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DraftInvoiceItem
+        fields = [
+            'id', 'product', 'product_name', 'unit', 'quantity', 'unit_price', 'total_price'
+        ]
+        read_only_fields = ['id', 'total_price']
+
+
+class DraftInvoiceOrderSerializer(serializers.ModelSerializer):
+    order_id = serializers.IntegerField(source='order.id', read_only=True)
+    order_total = serializers.DecimalField(source='order.total_amount', max_digits=10, decimal_places=2, read_only=True)
+    order_status = serializers.CharField(source='order.status', read_only=True)
+    order_date = serializers.DateTimeField(source='order.created_at', read_only=True)
+
+    class Meta:
+        model = DraftInvoiceOrder
+        fields = ['id', 'order_id', 'order_total', 'order_status', 'order_date', 'reserved_at']
+        read_only_fields = ['id', 'reserved_at']
+
+
+class DraftInvoiceDetailSerializer(serializers.ModelSerializer):
+    items = DraftInvoiceItemSerializer(many=True, read_only=True)
+    draft_orders = DraftInvoiceOrderSerializer(many=True, read_only=True)
+    created_by_name = serializers.CharField(source='created_by.username', read_only=True)
+    official_invoice_number = serializers.CharField(source='official_invoice.invoice_number', read_only=True)
+
+    class Meta:
+        model = DraftInvoice
+        fields = [
+            'id', 'draft_number', 'customer', 'customer_name', 'customer_phone',
+            'billing_source', 'status', 'subtotal', 'discount_amount', 'grand_total',
+            'due_date', 'notes', 'expires_at', 'created_by', 'created_by_name',
+            'official_invoice', 'official_invoice_number', 'created_at', 'updated_at',
+            'items', 'draft_orders'
+        ]
+        read_only_fields = [
+            'id', 'draft_number', 'status', 'subtotal', 'grand_total',
+            'created_by', 'created_by_name', 'official_invoice', 'official_invoice_number',
+            'created_at', 'updated_at'
+        ]
+
+
+class DraftInvoiceItemInputSerializer(serializers.Serializer):
+    product_id = serializers.IntegerField(required=False, allow_null=True)
+    product_name = serializers.CharField(max_length=200, required=False, allow_blank=True)
+    unit = serializers.CharField(max_length=50, required=False, default='Pc')
+    quantity = serializers.IntegerField(min_value=1)
+    unit_price = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal('0.00'))
+
+
+class DraftInvoiceCreateSerializer(serializers.Serializer):
+    customer_id = serializers.IntegerField(required=False, allow_null=True)
+    billing_source = serializers.ChoiceField(
+        choices=DraftInvoice.BILLING_SOURCE_CHOICES, default='quick_billing'
+    )
+    items = DraftInvoiceItemInputSerializer(many=True, required=False, default=list)
+    order_ids = serializers.ListField(
+        child=serializers.IntegerField(), required=False, default=list
+    )
+    discount_amount = serializers.DecimalField(
+        max_digits=10, decimal_places=2, required=False, default=Decimal('0.00'), min_value=Decimal('0.00')
+    )
+    due_date = serializers.DateField(required=False, allow_null=True)
+    notes = serializers.CharField(required=False, allow_blank=True, default='')
+
+    def validate(self, attrs):
+        billing_source = attrs.get('billing_source', 'quick_billing')
+        order_ids = attrs.get('order_ids', [])
+        items = attrs.get('items', [])
+
+        if billing_source in ('single_order', 'consolidated_orders') and not order_ids:
+            raise serializers.ValidationError({
+                'order_ids': f"At least one order ID must be provided for '{billing_source}'."
+            })
+
+        if billing_source == 'quick_billing' and not items:
+            raise serializers.ValidationError({
+                'items': "At least one product item is required for Quick Billing drafts."
+            })
+
+        return attrs
+
+
+class DraftInvoiceUpdateSerializer(serializers.Serializer):
+    customer_id = serializers.IntegerField(required=False, allow_null=True)
+    items = DraftInvoiceItemInputSerializer(many=True, required=False)
+    order_ids = serializers.ListField(
+        child=serializers.IntegerField(), required=False
+    )
+    discount_amount = serializers.DecimalField(
+        max_digits=10, decimal_places=2, required=False, min_value=Decimal('0.00')
+    )
+    due_date = serializers.DateField(required=False, allow_null=True)
+    notes = serializers.CharField(required=False, allow_blank=True)
+
+
+class DraftFinalizeSerializer(serializers.Serializer):
+    notes = serializers.CharField(required=False, allow_blank=True)
+

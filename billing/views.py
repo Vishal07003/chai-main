@@ -30,6 +30,10 @@ from .models import (
     Payment,
     PaymentAllocation,
     LedgerAdjustment,
+    InvoiceOrder,
+    DraftInvoice,
+    DraftInvoiceItem,
+    DraftInvoiceOrder,
 )
 from .serializers import (
     CompanySerializer,
@@ -39,10 +43,15 @@ from .serializers import (
     InvoiceCreateSerializer,
     PaymentSerializer,
     LedgerAdjustmentSerializer,
+    DraftInvoiceDetailSerializer,
+    DraftInvoiceCreateSerializer,
+    DraftInvoiceUpdateSerializer,
+    DraftFinalizeSerializer,
 )
 from .pdf_generator import generate_invoice_pdf
 from .ledger_service import LedgerService
 from .payment_service import PaymentAllocationService
+from .draft_service import DraftBillingService
 from accounts.permissions import IsOwnerUser
 
 class CompanyViewSet(viewsets.ModelViewSet):
@@ -508,3 +517,122 @@ class InvoiceViewSet(viewsets.ModelViewSet):
             'unpaid_invoices_count': unpaid_invoices_count,
             'defaulters_count': defaulters_count,
         })
+
+
+class DraftInvoiceViewSet(viewsets.ModelViewSet):
+    """
+    Phase 2: Centralized Draft Invoice API:
+    - POST /api/v1/billing/drafts/: Create new draft for Quick Billing, Single Order, Consolidated Orders, or Recurring.
+    - GET /api/v1/billing/drafts/: List drafts with customer, status, and billing_source filters.
+    - GET /api/v1/billing/drafts/{id}/: Retrieve draft detail with items and reserved orders.
+    - PATCH /api/v1/billing/drafts/{id}/: Edit draft items, rates, quantities, discounts, due_date, or order selections.
+    - POST /api/v1/billing/drafts/{id}/cancel/: Cancel draft and release order reservations.
+    - POST /api/v1/billing/drafts/{id}/finalize/: Atomically finalize draft into official Invoice.
+    """
+    queryset = DraftInvoice.objects.select_related('customer', 'created_by', 'official_invoice').prefetch_related('items', 'draft_orders__order').all().order_by('-created_at')
+    permission_classes = [permissions.IsAuthenticated, IsOwnerUser]
+
+    def get_serializer_class(self):
+        if self.action == 'create':
+            return DraftInvoiceCreateSerializer
+        if self.action in ('update', 'partial_update'):
+            return DraftInvoiceUpdateSerializer
+        if self.action == 'finalize':
+            return DraftFinalizeSerializer
+        return DraftInvoiceDetailSerializer
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        status_param = self.request.query_params.get('status')
+        source_param = self.request.query_params.get('billing_source')
+        customer_id = self.request.query_params.get('customer')
+        search = self.request.query_params.get('search', '').strip()
+
+        if status_param:
+            queryset = queryset.filter(status=status_param)
+        if source_param:
+            queryset = queryset.filter(billing_source=source_param)
+        if customer_id:
+            queryset = queryset.filter(customer_id=customer_id)
+        if search:
+            queryset = queryset.filter(
+                Q(draft_number__icontains=search) |
+                Q(customer_name__icontains=search) |
+                Q(customer_phone__icontains=search)
+            )
+
+        return queryset
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        customer_id = data.get('customer_id')
+        customer = Customer.objects.filter(id=customer_id).first() if customer_id else None
+
+        draft = DraftBillingService.create_draft(
+            customer=customer,
+            billing_source=data.get('billing_source', 'quick_billing'),
+            items_data=data.get('items'),
+            order_ids=data.get('order_ids'),
+            discount_amount=data.get('discount_amount', Decimal('0.00')),
+            due_date=data.get('due_date'),
+            notes=data.get('notes', ''),
+            created_by=request.user,
+        )
+
+        return Response(DraftInvoiceDetailSerializer(draft).data, status=status.HTTP_201_CREATED)
+
+    def partial_update(self, request, *args, **kwargs):
+        draft = self.get_object()
+        serializer = self.get_serializer(data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        customer_id = data.get('customer_id')
+        customer = Customer.objects.filter(id=customer_id).first() if customer_id is not None else None
+
+        updated_draft = DraftBillingService.update_draft(
+            draft=draft,
+            customer=customer if customer_id is not None else None,
+            items_data=data.get('items'),
+            order_ids=data.get('order_ids'),
+            discount_amount=data.get('discount_amount'),
+            due_date=data.get('due_date'),
+            notes=data.get('notes'),
+        )
+
+        return Response(DraftInvoiceDetailSerializer(updated_draft).data, status=status.HTTP_200_OK)
+
+    def update(self, request, *args, **kwargs):
+        return self.partial_update(request, *args, **kwargs)
+
+    @action(detail=True, methods=['post'])
+    def cancel(self, request, pk=None):
+        draft = self.get_object()
+        if draft.status == 'finalized':
+            raise ValidationError({'detail': 'Cannot cancel a finalized draft.'})
+        cancelled_draft = DraftBillingService.cancel_draft(draft)
+        return Response(DraftInvoiceDetailSerializer(cancelled_draft).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def finalize(self, request, pk=None):
+        draft = self.get_object()
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        notes = serializer.validated_data.get('notes')
+
+        official_invoice = DraftBillingService.finalize_draft(
+            draft_id=draft.id,
+            owner_user=request.user,
+            notes=notes,
+        )
+
+        return Response({
+            'success': True,
+            'message': f"Draft #{draft.draft_number} successfully finalized into official Invoice #{official_invoice.invoice_number}.",
+            'invoice': InvoiceDetailSerializer(official_invoice).data,
+            'draft': DraftInvoiceDetailSerializer(draft).data,
+        }, status=status.HTTP_201_CREATED)
+

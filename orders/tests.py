@@ -203,3 +203,97 @@ class OrdersTests(TestCase):
         order.refresh_from_db()
         self.assertEqual(order.total_amount, 135.00)
         self.assertEqual(order.items.count(), 2)
+
+    def test_global_and_per_template_notification_settings_phase_2a(self):
+        """
+        Phase 2A Notification Settings Test:
+        - Owner can fetch and patch global recurring notification settings.
+        - Unauthorized users (customer) cannot view or patch global settings.
+        - Global time hierarchy validation: notification time cannot precede order generation.
+        - RecurringOrder supports use_global_notification_settings and custom timings.
+        - Updating global settings does not overwrite custom template timings.
+        """
+        # 1. Non-owner / Customer cannot access global settings
+        self.client.force_authenticate(user=self.customer1)
+        unauth_get = self.client.get('/api/v1/orders/recurring-settings/')
+        self.assertEqual(unauth_get.status_code, status.HTTP_403_FORBIDDEN)
+
+        # 2. Owner can fetch global settings
+        self.client.force_authenticate(user=self.owner)
+        settings_res = self.client.get('/api/v1/orders/recurring-settings/')
+        self.assertEqual(settings_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(settings_res.data['order_generation_time'], '06:00:00')
+        self.assertEqual(settings_res.data['owner_notification_time'], '06:05:00')
+        self.assertEqual(settings_res.data['partner_notification_time'], '06:10:00')
+        self.assertTrue(settings_res.data['owner_notification_enabled'])
+        self.assertTrue(settings_res.data['partner_notification_enabled'])
+        self.assertEqual(settings_res.data['timezone'], 'Asia/Kolkata')
+
+        # 3. Time validation on Global Settings: notification earlier than generation fails
+        invalid_patch = self.client.patch('/api/v1/orders/recurring-settings/1/', {
+            'order_generation_time': '07:00:00',
+            'owner_notification_time': '06:30:00',
+        }, format='json')
+        self.assertEqual(invalid_patch.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('owner_notification_time', invalid_patch.data)
+
+        # 4. Valid update on Global Settings
+        valid_patch = self.client.patch('/api/v1/orders/recurring-settings/1/', {
+            'order_generation_time': '05:30:00',
+            'owner_notification_time': '05:35:00',
+            'partner_notification_time': '05:40:00',
+            'owner_notification_enabled': True,
+            'partner_notification_enabled': False,
+        }, format='json')
+        self.assertEqual(valid_patch.status_code, status.HTTP_200_OK)
+        self.assertEqual(valid_patch.data['order_generation_time'], '05:30:00')
+        self.assertFalse(valid_patch.data['partner_notification_enabled'])
+
+        # 5. Create Template with Custom Notification Settings
+        from billing.models import Customer
+        cust = Customer.objects.create(name='Global Corp', phone='8888888888', address='Tech Park')
+        template_payload = {
+            'customer_id': cust.id,
+            'delivery_address': 'Tech Park Suite 101',
+            'frequency': 'daily',
+            'use_global_notification_settings': False,
+            'custom_order_generation_time': '08:00:00',
+            'custom_owner_notification_time': '08:15:00',
+            'custom_partner_notification_time': '08:20:00',
+            'owner_notification_enabled': True,
+            'partner_notification_enabled': True,
+            'items': [
+                {'product_id': self.product1.id, 'quantity': 5, 'unit_price': 15.00}
+            ]
+        }
+        create_res = self.client.post('/api/v1/orders/recurring/', template_payload, format='json')
+        self.assertEqual(create_res.status_code, status.HTTP_201_CREATED)
+        rec_id = create_res.data['id']
+
+        # Verify custom schedule in serializer output
+        detail_res = self.client.get(f'/api/v1/orders/recurring/{rec_id}/')
+        self.assertEqual(detail_res.status_code, status.HTTP_200_OK)
+        self.assertFalse(detail_res.data['use_global_notification_settings'])
+        self.assertEqual(detail_res.data['custom_order_generation_time'], '08:00:00')
+        eff_schedule = detail_res.data['effective_notification_schedule']
+        self.assertTrue(eff_schedule['is_custom'])
+        self.assertEqual(eff_schedule['order_generation_time'], '08:00:00')
+
+        # 6. Verify custom schedule time validation (earlier notification rejected)
+        invalid_custom = self.client.patch(f'/api/v1/orders/recurring/{rec_id}/', {
+            'custom_order_generation_time': '09:00:00',
+            'custom_owner_notification_time': '08:30:00',
+        }, format='json')
+        self.assertEqual(invalid_custom.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('custom_owner_notification_time', invalid_custom.data)
+
+        # 7. Updating Global Settings DOES NOT overwrite custom template timings
+        self.client.patch('/api/v1/orders/recurring-settings/1/', {
+            'order_generation_time': '04:00:00',
+            'owner_notification_time': '04:10:00',
+        }, format='json')
+
+        detail_res2 = self.client.get(f'/api/v1/orders/recurring/{rec_id}/')
+        self.assertEqual(detail_res2.data['custom_order_generation_time'], '08:00:00')
+        self.assertEqual(detail_res2.data['custom_owner_notification_time'], '08:15:00')
+
