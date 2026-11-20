@@ -11,6 +11,7 @@ class Product(models.Model):
     name = models.CharField(max_length=200)
     category = models.ForeignKey(Category, on_delete=models.SET_NULL, null=True, related_name='products')
     price = models.DecimalField(max_digits=10, decimal_places=2)
+    unit = models.CharField(max_length=50, default='Pc', blank=True)
     description = models.TextField(blank=True, null=True)
     image_url = models.URLField(blank=True, null=True)
     is_available = models.BooleanField(default=True)
