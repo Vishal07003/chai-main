@@ -139,12 +139,10 @@ class Invoice(models.Model):
 
     @property
     def total_paid(self):
-        # Uses direct Payment links (legacy) or PaymentAllocation links
-        from_allocations = self.allocations.aggregate(total=models.Sum('allocated_amount'))['total']
-        if from_allocations is not None:
-            return from_allocations
-        total = self.payments.aggregate(total=models.Sum('amount'))['total']
-        return total or Decimal('0.00')
+        # Uses explicit PaymentAllocation links, plus any unallocated legacy direct payments on this invoice
+        from_allocations = self.allocations.aggregate(total=models.Sum('allocated_amount'))['total'] or Decimal('0.00')
+        from_unallocated_direct = self.payments.filter(allocations__isnull=True).aggregate(total=models.Sum('amount'))['total'] or Decimal('0.00')
+        return from_allocations + from_unallocated_direct
 
     @property
     def pending_amount(self):

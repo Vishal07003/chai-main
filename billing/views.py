@@ -123,11 +123,11 @@ class CompanyViewSet(viewsets.ModelViewSet):
         if amount <= Decimal('0.00'):
             raise ValidationError({'amount': 'Payment amount must be greater than zero.'})
 
-        # 1. Create top-level Payment record linked to the Company
-        payment = Payment.objects.create(
-            company=company,
+        # 1. Create top-level Payment record linked to the Company using centralized service
+        payment = PaymentAllocationService.record_payment(
             amount=amount,
             method=method,
+            company=company,
             reference_number=ref_no,
             notes=notes,
             recorded_by=user,
@@ -336,26 +336,22 @@ class CustomerViewSet(viewsets.ModelViewSet):
 
         pending_invoices = customer.invoices.exclude(status='paid').order_by('created_at')
 
-        # Create payment linked directly to Customer
-        pm = Payment.objects.create(
+        # Create payment linked directly to Customer using centralized service
+        pm = PaymentAllocationService.record_payment(
+            amount=amount,
+            method=method,
             customer=customer,
             company=customer.company,
-            amount=amount,
-            method=method if method in ('cash', 'online', 'upi', 'bank_transfer') else 'cash',
             notes=notes,
             recorded_by=request.user,
         )
 
-        allocated_now = Decimal('0.00')
-        invoices_settled = []
-
-        if pending_invoices.exists():
-            alloc_res = PaymentAllocationService.allocate_payment_fifo(
-                payment=pm,
-                target_invoices=list(pending_invoices)
-            )
-            allocated_now = Decimal(str(alloc_res['allocated_now']))
-            invoices_settled = alloc_res['invoices_settled']
+        alloc_res = PaymentAllocationService.allocate_payment_fifo(
+            payment=pm,
+            customer=customer,
+        )
+        allocated_now = Decimal(str(alloc_res['allocated_now']))
+        invoices_settled = alloc_res['invoices_settled']
 
         unallocated_advance = max(Decimal('0.00'), amount - allocated_now)
 
@@ -427,6 +423,7 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         amount_str = request.data.get('amount')
         method = request.data.get('method', 'cash')
         notes = request.data.get('notes', '')
+        ref_no = request.data.get('reference_number', '')
 
         try:
             amount = Decimal(str(amount_str))
@@ -442,23 +439,25 @@ class InvoiceViewSet(viewsets.ModelViewSet):
                 'amount': f"Payment amount (₹{amount}) cannot exceed remaining pending amount (₹{remaining_due})."
             })
 
-        payment = Payment.objects.create(
-            company=invoice.company,
-            invoice=invoice,
+        # Record and allocate using centralized payment service
+        payment = PaymentAllocationService.record_payment(
             amount=amount,
             method=method,
+            customer=invoice.customer,
+            company=invoice.company,
+            invoice=invoice,
+            reference_number=ref_no,
             notes=notes,
             recorded_by=request.user,
         )
-        PaymentAllocation.objects.create(
+        PaymentAllocationService.allocate_payment_fifo(
             payment=payment,
-            invoice=invoice,
-            allocated_amount=amount,
-            notes=f"Direct payment to {invoice.invoice_number}"
+            target_invoices=[invoice]
         )
-        invoice.update_payment_status()
+        # Fetch fresh invoice instance without stale prefetch caches
+        fresh_invoice = self.get_queryset().get(id=invoice.id)
 
-        return Response(InvoiceDetailSerializer(invoice).data, status=status.HTTP_201_CREATED)
+        return Response(InvoiceDetailSerializer(fresh_invoice).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['get'], renderer_classes=[PassthroughPdfRenderer])
     def pdf(self, request, pk=None):
@@ -492,8 +491,15 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         partially_paid_invoices_count = all_invoices.filter(status='partially_paid').count()
         unpaid_invoices_count = all_invoices.filter(status='unpaid').count()
         
-        # Defaulters: count of customers with positive pending balance and genuinely overdue status
-        defaulters_count = sum(1 for c in Customer.objects.all() if any(inv.pending_amount > 0 and (timezone.now() - inv.created_at).days > 7 for inv in c.invoices.exclude(status='void')))
+        # Defaulters: count of customers with positive pending balance and an explicitly assigned past due date
+        today = timezone.now().date()
+        def is_customer_defaulter(c):
+            for inv in c.invoices.exclude(status='void'):
+                if inv.pending_amount > Decimal('0.00') and inv.due_date is not None and inv.due_date < today:
+                    return True
+            return False
+
+        defaulters_count = sum(1 for c in Customer.objects.all() if is_customer_defaulter(c))
 
         # Orders metrics
         from orders.models import Order

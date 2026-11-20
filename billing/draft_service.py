@@ -432,4 +432,8 @@ class DraftBillingService:
             locked_draft.official_invoice = official_invoice
             locked_draft.save(update_fields=['status', 'official_invoice', 'updated_at'])
 
+            # Phase 3: Automatic advance allocation upon finalization
+            from billing.payment_service import PaymentAllocationService
+            PaymentAllocationService.allocate_customer_advances_on_invoice(official_invoice)
+
             return official_invoice

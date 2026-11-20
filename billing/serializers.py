@@ -132,10 +132,9 @@ class CustomerSerializer(serializers.ModelSerializer):
         pending = Decimal(self.get_total_pending_amount(obj))
         if pending <= Decimal('0.00'):
             return False
-        # Overdue if has any pending invoice older than 7 days
-        now = timezone.now()
+        today = timezone.now().date()
         for inv in obj.invoices.exclude(status='void'):
-            if inv.pending_amount > Decimal('0.00') and (now - inv.created_at).days > 7:
+            if inv.pending_amount > Decimal('0.00') and inv.due_date is not None and inv.due_date < today:
                 return True
         return False
 
@@ -191,18 +190,21 @@ class InvoiceDetailSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'invoice_number', 'order', 'company', 'company_name',
             'customer', 'customer_name', 'customer_phone',
-            'subtotal', 'discount_amount', 'grand_total', 'status', 'notes', 'created_at',
+            'subtotal', 'discount_amount', 'grand_total', 'status', 'due_date', 'finalized_at', 'notes', 'created_at',
             'items', 'payments', 'allocations', 'total_paid', 'pending_amount', 'is_overdue'
         ]
         read_only_fields = [
-            'id', 'invoice_number', 'order', 'created_at', 'status',
+            'id', 'invoice_number', 'order', 'created_at', 'status', 'finalized_at',
             'total_paid', 'pending_amount', 'company_name', 'is_overdue'
         ]
 
     def get_is_overdue(self, obj):
         if obj.status == 'paid' or obj.pending_amount <= Decimal('0.00'):
             return False
-        return (timezone.now() - obj.created_at).days > 7
+        if obj.due_date is None:
+            return False
+        today = timezone.now().date()
+        return obj.due_date < today
 
 
 class InvoiceCreateItemSerializer(serializers.Serializer):
@@ -341,19 +343,18 @@ class InvoiceCreateSerializer(serializers.Serializer):
                     raise serializers.ValidationError({
                         'initial_payment_amount': f"Payment amount (₹{init_amount}) cannot exceed total bill amount (₹{invoice.grand_total})."
                     })
-                pm = Payment.objects.create(
+                from .payment_service import PaymentAllocationService
+                pm = PaymentAllocationService.record_payment(
+                    amount=init_amount,
+                    method=init_method,
                     customer=customer,
                     company=company,
                     invoice=invoice,
-                    amount=init_amount,
-                    method=init_method,
                     notes='Initial billing payment'
                 )
-                PaymentAllocation.objects.create(
+                PaymentAllocationService.allocate_payment_fifo(
                     payment=pm,
-                    invoice=invoice,
-                    allocated_amount=init_amount,
-                    notes='Initial full/partial payment allocation'
+                    target_invoices=[invoice]
                 )
             
             invoice.update_payment_status()
