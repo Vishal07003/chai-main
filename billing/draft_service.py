@@ -342,6 +342,110 @@ class DraftBillingService:
             return created_links
 
     @classmethod
+    def _create_fulfillment_order_and_delivery(cls, draft: DraftInvoice, official_invoice: Invoice, owner_user):
+        """
+        Phase 5B: Creates an operational Fulfillment Order container and Delivery record
+        upon successful finalization of a Quick Billing draft with an assigned active Delivery Partner.
+        Ensures strict idempotency and consistency across relationships.
+        """
+        from orders.models import Order, OrderItem
+        from deliveries.models import Delivery, DeliveryStatusHistory
+        from notifications.services import NotificationService
+
+        # 1. Idempotency Check: Check if an Order is already linked to this invoice
+        existing_order = Order.objects.filter(order_billing__invoice=official_invoice).first()
+        if not existing_order and official_invoice.order:
+            existing_order = official_invoice.order
+
+        if existing_order:
+            # Already created, ensure Delivery exists and avoid duplicate creation
+            return existing_order
+
+        # 2. Determine Order customer and customer_profile
+        # Customer resolution: Order.customer must be a valid User (cannot be null)
+        customer_user = None
+        if draft.customer and getattr(draft.customer, 'user', None):
+            customer_user = draft.customer.user
+        elif owner_user and owner_user.is_authenticated:
+            customer_user = owner_user
+        elif draft.created_by and draft.created_by.is_authenticated:
+            customer_user = draft.created_by
+        else:
+            # Fallback to first superuser or owner
+            from django.contrib.auth.models import User
+            customer_user = User.objects.filter(is_superuser=True).first() or User.objects.first()
+
+        customer_profile = draft.customer
+        company = draft.customer.company if (draft.customer and getattr(draft.customer, 'company', None)) else None
+
+        delivery_address = ''
+        if draft.customer and draft.customer.address:
+            delivery_address = draft.customer.address
+        else:
+            delivery_address = "Walk-in / Counter Pickup"
+
+        operational_notes = f"Fulfillment Order for Official Invoice #{official_invoice.invoice_number}."
+        if draft.notes:
+            operational_notes += f" {draft.notes}"
+
+        # 3. Create operational Order container
+        order = Order.objects.create(
+            customer=customer_user,
+            customer_profile=customer_profile,
+            company=company,
+            delivery_address=delivery_address,
+            status='accepted',
+            total_amount=draft.grand_total,
+            notes=operational_notes,
+        )
+
+        # 4. Create OrderItems from DraftInvoiceItem snapshots
+        for d_item in draft.items.all():
+            OrderItem.objects.create(
+                order=order,
+                product=d_item.product,
+                quantity=d_item.quantity,
+                price=d_item.unit_price,
+            )
+
+        # 5. Link Order to Official Invoice
+        InvoiceOrder.objects.create(
+            invoice=official_invoice,
+            order=order,
+        )
+        if not official_invoice.order:
+            official_invoice.order = order
+            official_invoice.save(update_fields=['order'])
+
+        # 6. Create Delivery Record
+        driver_user = draft.delivery_partner.user
+        delivery, created = Delivery.objects.get_or_create(
+            order=order,
+            defaults={
+                'driver': driver_user,
+                'status': 'assigned',
+            }
+        )
+        if not created and delivery.driver != driver_user:
+            delivery.driver = driver_user
+            delivery.save(update_fields=['driver'])
+
+        # 7. Record initial DeliveryStatusHistory audit log
+        DeliveryStatusHistory.objects.create(
+            delivery=delivery,
+            from_status='',
+            to_status='assigned',
+            changed_by=owner_user,
+            notes=f"Assigned upon finalization of Quick Billing Invoice #{official_invoice.invoice_number}"
+        )
+
+        # 8. Dispatch notification via transaction.on_commit
+        if driver_user:
+            transaction.on_commit(lambda: NotificationService.on_delivery_assigned(delivery))
+
+        return order
+
+    @classmethod
     def finalize_draft(cls, draft_id: int, owner_user, notes: str = None) -> Invoice:
         """
         Finalizes a DraftInvoice into an official Invoice atomically:
@@ -444,5 +548,10 @@ class DraftBillingService:
             # Phase 3: Automatic advance allocation upon finalization
             from billing.payment_service import PaymentAllocationService
             PaymentAllocationService.allocate_customer_advances_on_invoice(official_invoice)
+
+            # Phase 5B: Operational Fulfillment Order and Delivery Dispatch for Quick Billing
+            # Only Quick Billing drafts with an active Delivery Partner trigger fulfillment dispatch
+            if locked_draft.billing_source == 'quick_billing' and locked_draft.delivery_partner:
+                cls._create_fulfillment_order_and_delivery(locked_draft, official_invoice, owner_user)
 
             return official_invoice

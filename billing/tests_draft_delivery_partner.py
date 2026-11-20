@@ -186,7 +186,7 @@ class Phase4A2DeliveryPartnerDraftSupportTests(TestCase):
         self.assertEqual(Delivery.objects.count(), delivery_count_before)
 
     def test_9_finalization_creates_no_duplicate_orders_or_deliveries(self):
-        """9. Finalizing a draft with a delivery partner generates an official invoice without duplicate orders."""
+        """9. Finalizing a draft with a delivery partner generates an official invoice and exactly 1 fulfillment order and delivery."""
         order_count_before = Order.objects.count()
         delivery_count_before = Delivery.objects.count()
 
@@ -202,9 +202,9 @@ class Phase4A2DeliveryPartnerDraftSupportTests(TestCase):
 
         # Official invoice created
         self.assertTrue(Invoice.objects.filter(invoice_number=res.data['invoice']['invoice_number']).exists())
-        # Zero unexpected duplicate Order or Delivery records created
-        self.assertEqual(Order.objects.count(), order_count_before)
-        self.assertEqual(Delivery.objects.count(), delivery_count_before)
+        # Phase 5B: Exactly 1 fulfillment Order and 1 Delivery created
+        self.assertEqual(Order.objects.count(), order_count_before + 1)
+        self.assertEqual(Delivery.objects.count(), delivery_count_before + 1)
 
     def test_10_existing_drafts_without_partner_remain_valid(self):
         """10. Existing drafts with null delivery_partner remain readable and editable."""
