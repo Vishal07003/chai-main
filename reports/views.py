@@ -118,15 +118,28 @@ class ReportProfitLossView(BaseReportView):
         return Response(data)
 
 
+class ReportUnifiedView(BaseReportView):
+    """
+    Phase R5: Unified Business Report API.
+    Returns complete consolidated business and financial metrics in one call.
+    """
+    def get(self, request):
+        range_info = self.get_range_info(request)
+        data = ReportsEngine.get_unified_report(range_info)
+        return Response(data)
+
+
 class ReportExportPdfView(BaseReportView):
     renderer_classes = [PassthroughPdfRenderer]
     content_negotiation_class = ForgivingContentNegotiation
 
     def get(self, request):
-        report_type = request.query_params.get('report_type', 'sales').lower().strip()
+        report_type = request.query_params.get('report_type', 'unified').lower().strip()
         range_info = self.get_range_info(request)
 
         engine_dispatch = {
+            'unified': ReportsEngine.get_unified_report,
+            'business-report': ReportsEngine.get_unified_report,
             'overview': ReportsEngine.get_overview,
             'sales': ReportsEngine.get_sales_report,
             'collections': ReportsEngine.get_collections_report,
@@ -146,7 +159,23 @@ class ReportExportPdfView(BaseReportView):
         data = func(range_info)
         pdf_bytes = generate_report_pdf(report_type, data)
 
-        filename = f"ChaiFlow_Report_{report_type}_{range_info['from_date']}.pdf"
+        filter_type = range_info.get('filter_type', 'custom')
+        if filter_type == 'last_30_days':
+            period_slug = "Last_30_Days"
+        elif filter_type == 'last_month':
+            period_slug = "Last_Month"
+        elif filter_type == 'last_3_months':
+            period_slug = "Last_3_Months"
+        elif filter_type == 'custom':
+            period_slug = f"Custom_{range_info['from_date']}_to_{range_info['to_date']}"
+        else:
+            period_slug = f"{filter_type}_{range_info['from_date']}"
+
+        if report_type in ['unified', 'business-report']:
+            filename = f"ChaiFlow_Business_Report_{period_slug}.pdf"
+        else:
+            filename = f"ChaiFlow_Report_{report_type}_{range_info['from_date']}.pdf"
+
         response = HttpResponse(pdf_bytes, content_type='application/pdf')
         response['Content-Disposition'] = f'attachment; filename="{filename}"'
         response['Content-Length'] = len(pdf_bytes)
@@ -158,10 +187,12 @@ class ReportExportExcelView(BaseReportView):
     content_negotiation_class = ForgivingContentNegotiation
 
     def get(self, request):
-        report_type = request.query_params.get('report_type', 'sales').lower().strip()
+        report_type = request.query_params.get('report_type', 'unified').lower().strip()
         range_info = self.get_range_info(request)
 
         engine_dispatch = {
+            'unified': ReportsEngine.get_unified_report,
+            'business-report': ReportsEngine.get_unified_report,
             'overview': ReportsEngine.get_overview,
             'sales': ReportsEngine.get_sales_report,
             'collections': ReportsEngine.get_collections_report,
@@ -181,7 +212,23 @@ class ReportExportExcelView(BaseReportView):
         data = func(range_info)
         excel_bytes = generate_report_excel(report_type, data)
 
-        filename = f"ChaiFlow_Report_{report_type}_{range_info['from_date']}.xlsx"
+        filter_type = range_info.get('filter_type', 'custom')
+        if filter_type == 'last_30_days':
+            period_slug = "Last_30_Days"
+        elif filter_type == 'last_month':
+            period_slug = "Last_Month"
+        elif filter_type == 'last_3_months':
+            period_slug = "Last_3_Months"
+        elif filter_type == 'custom':
+            period_slug = f"Custom_{range_info['from_date']}_to_{range_info['to_date']}"
+        else:
+            period_slug = f"{filter_type}_{range_info['from_date']}"
+
+        if report_type in ['unified', 'business-report']:
+            filename = f"ChaiFlow_Business_Report_{period_slug}.xlsx"
+        else:
+            filename = f"ChaiFlow_Report_{report_type}_{range_info['from_date']}.xlsx"
+
         response = HttpResponse(excel_bytes, content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
         response['Content-Disposition'] = f'attachment; filename="{filename}"'
         response['Content-Length'] = len(excel_bytes)

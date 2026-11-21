@@ -307,3 +307,34 @@ class ReportsBackendEngineTests(TestCase):
         )
         self.assertEqual(resp_excel_json_accept.status_code, status.HTTP_200_OK)
         self.assertTrue(resp_excel_json_accept.content.startswith(b'PK'))
+
+    def test_unified_report_and_exports(self):
+        """Phase R5: Verify unified report endpoint, calculations, and PDF/Excel exports."""
+        self.client.force_authenticate(user=self.owner)
+
+        resp = self.client.get('/api/v1/reports/unified/?filter_type=last_30_days')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        data = resp.data
+
+        self.assertIn('summary', data)
+        self.assertIn('sales_invoices', data)
+        self.assertIn('collection_transactions', data)
+        self.assertIn('customer_outstanding', data)
+        self.assertIn('customer_payment_history', data)
+        self.assertIn('discounts', data)
+        self.assertIn('expenses', data)
+        self.assertIn('deliveries', data)
+        self.assertIn('profit_loss', data)
+
+        # PDF export of unified report
+        resp_pdf = self.client.get('/api/v1/reports/export/pdf/?report_type=unified&filter_type=last_30_days')
+        self.assertEqual(resp_pdf.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp_pdf['Content-Type'], 'application/pdf')
+        self.assertTrue(resp_pdf.content.startswith(b'%PDF'))
+        self.assertIn('ChaiFlow_Business_Report_Last_30_Days.pdf', resp_pdf['Content-Disposition'])
+
+        # Excel export of unified report
+        resp_excel = self.client.get('/api/v1/reports/export/excel/?report_type=unified&filter_type=last_30_days')
+        self.assertEqual(resp_excel.status_code, status.HTTP_200_OK)
+        self.assertTrue(resp_excel.content.startswith(b'PK'))
+        self.assertIn('ChaiFlow_Business_Report_Last_30_Days.xlsx', resp_excel['Content-Disposition'])

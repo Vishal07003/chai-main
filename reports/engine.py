@@ -692,3 +692,360 @@ class ReportsEngine:
             },
             'expense_categories': category_breakdown,
         }
+
+    @classmethod
+    def get_unified_report(cls, range_info: dict) -> dict:
+        """
+        Unified Business Report (Phase R5):
+        Consolidates all business and financial dimensions into ONE unified dataset:
+        A. Business Summary (KPIs, Financials, Portfolio Outstanding, Orders, Deliveries, P&L)
+        B. Sales & Invoice Details (All finalized invoices in period)
+        C. Collection & Payment Transactions (Payments in period, methods, references, unallocated, allocations)
+        D. Customer-wise Outstanding (Current pending, overdue, advance credits, last payment date)
+        E. Customer Payment History (Chronological payment allocation audit trail)
+        F. Discounts & Expenses (Discounts summary & operating expenses breakdown with individual entries)
+        G. Delivery Summary (Fulfillment statuses, partner performance, quantity discrepancies)
+        H. Profit & Loss (Net Sales, COGS, Gross Profit, Operating Expenses, Net Profit, Coverage status)
+        """
+        start_dt = range_info['start_dt']
+        end_dt = range_info['end_dt']
+        start_date = range_info['from_date']
+        end_date = range_info['to_date']
+        today = timezone.now().astimezone(KOLKATA_TZ).date()
+
+        # 1. Sales & Invoices in period
+        invoices_qs = Invoice.objects.filter(
+            created_at__gte=start_dt,
+            created_at__lte=end_dt,
+        ).exclude(status='void').select_related('customer', 'company', 'order').prefetch_related('invoice_orders', 'allocations', 'payments')
+
+        sales_agg = invoices_qs.aggregate(
+            gross_subtotal=Sum('subtotal'),
+            total_discounts=Sum('discount_amount'),
+            net_sales=Sum('grand_total'),
+            invoice_count=Count('id'),
+        )
+        gross_subtotal = sales_agg['gross_subtotal'] or Decimal('0.00')
+        total_discounts = sales_agg['total_discounts'] or Decimal('0.00')
+        net_sales = sales_agg['net_sales'] or Decimal('0.00')
+        invoice_count = sales_agg['invoice_count'] or 0
+
+        # Detailed Invoices List
+        sales_invoices = []
+        for inv in invoices_qs.order_by('-created_at'):
+            is_cons = getattr(inv, 'invoice_orders', None) and inv.invoice_orders.count() > 1
+            source_lbl = 'Consolidated' if is_cons else ('Single Order' if inv.order_id else 'Quick Billing')
+            cust_name = inv.customer.name if inv.customer else (inv.company.name if inv.company else inv.customer_name)
+            cust_phone = inv.customer.phone if inv.customer else (inv.company.phone if inv.company else inv.customer_phone)
+            paid_amount = inv.total_paid
+            pending_amt = inv.pending_amount
+
+            sales_invoices.append({
+                'id': inv.id,
+                'invoice_number': inv.invoice_number,
+                'invoice_date': inv.created_at.astimezone(KOLKATA_TZ).strftime('%Y-%m-%d %H:%M'),
+                'customer_name': cust_name,
+                'customer_phone': cust_phone,
+                'source': source_lbl,
+                'gross_amount': str(inv.subtotal),
+                'discount_amount': str(inv.discount_amount),
+                'net_invoice_amount': str(inv.grand_total),
+                'amount_paid': str(paid_amount),
+                'pending_amount': str(pending_amt),
+                'status': inv.status,
+                'due_date': inv.due_date.isoformat() if inv.due_date else None,
+            })
+
+        # 2. Collections & Payments in period
+        payments_qs = Payment.objects.filter(
+            received_at__gte=start_dt,
+            received_at__lte=end_dt,
+        ).select_related('customer', 'company').prefetch_related('allocations__invoice')
+
+        coll_agg = payments_qs.aggregate(
+            total_collections=Sum('amount'),
+            payment_count=Count('id')
+        )
+        total_collections = coll_agg['total_collections'] or Decimal('0.00')
+        payment_count = coll_agg['payment_count'] or 0
+
+        payment_transactions = []
+        for p in payments_qs.order_by('-received_at'):
+            cust_name = p.customer.name if p.customer else (p.company.name if p.company else 'Direct Account')
+            alloc_invoices = []
+            for alloc in p.allocations.all():
+                alloc_invoices.append(f"{alloc.invoice.invoice_number} (₹{alloc.allocated_amount})")
+            invoices_str = ', '.join(alloc_invoices) if alloc_invoices else 'Unallocated'
+
+            payment_transactions.append({
+                'id': p.id,
+                'customer_name': cust_name,
+                'payment_date': p.received_at.astimezone(KOLKATA_TZ).strftime('%Y-%m-%d %H:%M'),
+                'amount_received': str(p.amount),
+                'method': p.get_method_display(),
+                'reference_number': p.reference_number or '-',
+                'allocated_amount': str(p.total_allocated),
+                'unallocated_advance': str(p.unallocated_amount),
+                'is_advance': p.unallocated_amount > Decimal('0.00'),
+                'allocated_invoices': invoices_str,
+            })
+
+        # 3. Customer-wise Outstanding & Portfolio Balances (As of Report Generation Date)
+        all_unpaid_invoices = Invoice.objects.exclude(status__in=['paid', 'void']).select_related('customer', 'company').prefetch_related('allocations', 'payments')
+
+        total_portfolio_outstanding = Decimal('0.00')
+        total_overdue_outstanding = Decimal('0.00')
+        overdue_invoices_count = 0
+
+        customer_outstanding_map = {}
+
+        for inv in all_unpaid_invoices:
+            pending = inv.pending_amount
+            if pending <= Decimal('0.00'):
+                continue
+
+            total_portfolio_outstanding += pending
+
+            is_overdue = False
+            if inv.due_date is not None and inv.due_date < today:
+                is_overdue = True
+                total_overdue_outstanding += pending
+                overdue_invoices_count += 1
+
+            cust_key = inv.customer_id or f"comp_{inv.company_id}" or "walkin"
+            cust_name = inv.customer.name if inv.customer else (inv.company.name if inv.company else inv.customer_name)
+            cust_phone = inv.customer.phone if inv.customer else (inv.company.phone if inv.company else inv.customer_phone)
+
+            if cust_key not in customer_outstanding_map:
+                customer_outstanding_map[cust_key] = {
+                    'customer_id': inv.customer_id,
+                    'customer_name': cust_name,
+                    'phone': cust_phone,
+                    'current_outstanding': Decimal('0.00'),
+                    'overdue_balance': Decimal('0.00'),
+                    'unpaid_invoices_count': 0,
+                }
+            customer_outstanding_map[cust_key]['current_outstanding'] += pending
+            if is_overdue:
+                customer_outstanding_map[cust_key]['overdue_balance'] += pending
+            customer_outstanding_map[cust_key]['unpaid_invoices_count'] += 1
+
+        # Customer advance credits across all payments
+        all_payments_all_time = Payment.objects.all().prefetch_related('allocations')
+        total_customer_advance_credits = Decimal('0.00')
+        customer_advance_map = {}
+        for p in all_payments_all_time:
+            unalloc = p.unallocated_amount
+            if unalloc > Decimal('0.00'):
+                total_customer_advance_credits += unalloc
+                cust_key = p.customer_id or f"comp_{p.company_id}" or "walkin"
+                customer_advance_map[cust_key] = customer_advance_map.get(cust_key, Decimal('0.00')) + unalloc
+
+        # Enrich customer-wise records with lifetime totals and last payment date
+        customers_qs = Customer.objects.all().prefetch_related('invoices', 'payments')
+        customer_outstanding_rows = []
+        for c in customers_qs:
+            cust_key = c.id
+            c_invoices = c.invoices.exclude(status='void')
+            total_billed = c_invoices.aggregate(s=Sum('grand_total'))['s'] or Decimal('0.00')
+            total_collected = c.payments.aggregate(s=Sum('amount'))['s'] or Decimal('0.00')
+            current_due = customer_outstanding_map.get(cust_key, {}).get('current_outstanding', Decimal('0.00'))
+            overdue_due = customer_outstanding_map.get(cust_key, {}).get('overdue_balance', Decimal('0.00'))
+            advance_cr = customer_advance_map.get(cust_key, Decimal('0.00'))
+
+            last_payment = c.payments.order_by('-received_at').first()
+            last_payment_date = last_payment.received_at.astimezone(KOLKATA_TZ).strftime('%Y-%m-%d') if last_payment else '-'
+
+            if total_billed > 0 or total_collected > 0 or current_due > 0 or advance_cr > 0:
+                customer_outstanding_rows.append({
+                    'customer_id': c.id,
+                    'customer_name': c.name,
+                    'phone': c.phone or '-',
+                    'total_billed': str(total_billed),
+                    'total_collected': str(total_collected),
+                    'current_outstanding': str(current_due),
+                    'overdue_balance': str(overdue_due),
+                    'advance_credit': str(advance_cr),
+                    'last_payment_date': last_payment_date,
+                })
+
+        customer_outstanding_rows.sort(key=lambda x: Decimal(x['current_outstanding']), reverse=True)
+
+        # 4. Customer Payment History (Chronological audit of allocations within period)
+        allocations_in_period = PaymentAllocation.objects.filter(
+            payment__received_at__gte=start_dt,
+            payment__received_at__lte=end_dt,
+        ).select_related('payment', 'payment__customer', 'invoice').order_by('-payment__received_at')
+
+        payment_history = []
+        for al in allocations_in_period:
+            p = al.payment
+            cname = p.customer.name if p.customer else 'Direct Account'
+            payment_history.append({
+                'customer_name': cname,
+                'payment_date': p.received_at.astimezone(KOLKATA_TZ).strftime('%Y-%m-%d %H:%M'),
+                'payment_amount': str(p.amount),
+                'payment_method': p.get_method_display(),
+                'reference': p.reference_number or '-',
+                'invoice_allocation': f"{al.invoice.invoice_number} (₹{al.allocated_amount})",
+                'remaining_balance': str(al.invoice.pending_amount),
+            })
+
+        # 5. Discounts & Operating Expenses
+        # Discounts
+        discounted_invoices_qs = invoices_qs.filter(discount_amount__gt=Decimal('0.00'))
+        discounted_invoices = [
+            {
+                'invoice_number': inv.invoice_number,
+                'customer_name': inv.customer_name,
+                'invoice_date': inv.created_at.astimezone(KOLKATA_TZ).strftime('%Y-%m-%d'),
+                'subtotal': str(inv.subtotal),
+                'discount_amount': str(inv.discount_amount),
+                'grand_total': str(inv.grand_total),
+                'discount_pct': round((inv.discount_amount / inv.subtotal * 100), 1) if inv.subtotal > 0 else 0.0,
+            }
+            for inv in discounted_invoices_qs.order_by('-discount_amount')
+        ]
+
+        # Expenses
+        expenses_qs = Expense.objects.filter(
+            expense_date__gte=start_date,
+            expense_date__lte=end_date,
+        ).order_by('-expense_date', '-created_at')
+
+        total_operating_expenses = expenses_qs.aggregate(s=Sum('amount'))['s'] or Decimal('0.00')
+
+        expense_list = [
+            {
+                'id': exp.id,
+                'title': exp.title,
+                'category': exp.category,
+                'category_display': exp.get_category_display(),
+                'amount': str(exp.amount),
+                'expense_date': exp.expense_date.isoformat(),
+                'payment_method': exp.get_payment_method_display(),
+            }
+            for exp in expenses_qs
+        ]
+
+        # 6. Delivery Summary
+        deliveries_qs = Delivery.objects.filter(
+            order__created_at__gte=start_dt,
+            order__created_at__lte=end_dt,
+        ).select_related('order', 'driver', 'driver__partner_profile').prefetch_related('delivered_items')
+
+        total_deliveries = deliveries_qs.count()
+        delivered_count = deliveries_qs.filter(status='delivered').count()
+        failed_count = deliveries_qs.filter(status='failed').count()
+        pending_deliveries_count = deliveries_qs.filter(status='pending').count()
+        in_progress_count = total_deliveries - (delivered_count + failed_count + pending_deliveries_count)
+        completion_rate = round((delivered_count / total_deliveries * 100), 1) if total_deliveries > 0 else 0.0
+
+        partner_stats = {}
+        discrepancies = []
+        for d in deliveries_qs:
+            driver_name = d.driver.partner_profile.name if hasattr(d.driver, 'partner_profile') and d.driver.partner_profile else (d.driver.username if d.driver else 'Unassigned')
+            d_id = d.driver_id or 0
+            if d_id not in partner_stats:
+                partner_stats[d_id] = {'partner_name': driver_name, 'assigned': 0, 'delivered': 0, 'failed': 0}
+            partner_stats[d_id]['assigned'] += 1
+            if d.status == 'delivered':
+                partner_stats[d_id]['delivered'] += 1
+            elif d.status == 'failed':
+                partner_stats[d_id]['failed'] += 1
+
+            for it in d.delivered_items.all():
+                if it.has_discrepancy:
+                    discrepancies.append({
+                        'delivery_id': d.id,
+                        'order_id': d.order_id,
+                        'partner_name': driver_name,
+                        'product_name': it.product.name if it.product else 'Item',
+                        'ordered_qty': it.ordered_quantity,
+                        'delivered_qty': it.delivered_quantity,
+                        'notes': it.discrepancy_notes,
+                    })
+
+        partners_roster = list(partner_stats.values())
+        partners_roster.sort(key=lambda x: x['delivered'], reverse=True)
+
+        # 7. Profit & Loss Computations
+        items_qs = InvoiceItem.objects.filter(invoice__in=invoices_qs)
+        total_items_count = items_qs.count()
+        items_with_cost = items_qs.filter(total_cost__isnull=False)
+        items_with_cost_count = items_with_cost.count()
+        cogs_captured = items_with_cost.aggregate(s=Sum('total_cost'))['s'] or Decimal('0.00')
+
+        if total_items_count == 0:
+            coverage_status = 'complete'
+        elif items_with_cost_count == total_items_count:
+            coverage_status = 'complete'
+        elif items_with_cost_count > 0:
+            coverage_status = 'partial'
+        else:
+            coverage_status = 'unavailable'
+
+        gross_profit = net_sales - cogs_captured
+        net_profit = gross_profit - total_operating_expenses
+        profit_margin_pct = round((net_profit / net_sales * 100), 2) if net_sales > Decimal('0.00') else 0.0
+
+        # Orders count in period
+        from orders.models import Order
+        total_orders_count = Order.objects.filter(created_at__gte=start_dt, created_at__lte=end_dt).count()
+
+        return {
+            'date_filter': range_info,
+            'summary': {
+                'gross_sales': str(gross_subtotal),
+                'total_discounts': str(total_discounts),
+                'net_sales': str(net_sales),
+                'total_collections': str(total_collections),
+                'portfolio_outstanding': str(total_portfolio_outstanding),
+                'overdue_outstanding': str(total_overdue_outstanding),
+                'total_advance_credits': str(total_customer_advance_credits),
+                'total_invoices': invoice_count,
+                'total_payment_transactions': payment_count,
+                'total_orders': total_orders_count,
+                'completed_deliveries': delivered_count,
+                'operating_expenses': str(total_operating_expenses),
+                'cogs': str(cogs_captured),
+                'gross_profit': str(gross_profit),
+                'net_profit': str(net_profit),
+                'profit_margin_pct': profit_margin_pct,
+                'cost_coverage_status': coverage_status,
+                'items_with_cost_count': items_with_cost_count,
+                'total_items_count': total_items_count,
+            },
+            'sales_invoices': sales_invoices,
+            'collection_transactions': payment_transactions,
+            'customer_outstanding': customer_outstanding_rows,
+            'customer_payment_history': payment_history,
+            'discounts': {
+                'total_discount_amount': str(total_discounts),
+                'discounted_invoices_count': len(discounted_invoices),
+                'invoices': discounted_invoices,
+            },
+            'expenses': {
+                'total_expenses': str(total_operating_expenses),
+                'items': expense_list,
+            },
+            'deliveries': {
+                'total_deliveries': total_deliveries,
+                'delivered': delivered_count,
+                'failed': failed_count,
+                'pending': pending_deliveries_count,
+                'in_progress': in_progress_count,
+                'completion_rate_pct': completion_rate,
+                'partners': partners_roster,
+                'discrepancies': discrepancies,
+            },
+            'profit_loss': {
+                'net_sales': str(net_sales),
+                'cogs': str(cogs_captured),
+                'cost_coverage_status': coverage_status,
+                'gross_profit': str(gross_profit),
+                'operating_expenses': str(total_operating_expenses),
+                'net_profit': str(net_profit),
+                'profit_margin_pct': profit_margin_pct,
+            },
+        }

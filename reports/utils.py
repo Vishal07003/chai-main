@@ -35,9 +35,17 @@ def resolve_date_range(query_params: dict):
         filter_type = 'custom'
 
     if not filter_type:
-        filter_type = 'this_month'
+        filter_type = 'last_30_days'
 
-    if filter_type == 'today':
+    if filter_type == 'last_30_days':
+        start_date = today - datetime.timedelta(days=29)
+        end_date = today
+        label = f"Last 30 Days ({start_date.isoformat()} to {end_date.isoformat()})"
+    elif filter_type == 'last_3_months':
+        start_date = today - datetime.timedelta(days=89)
+        end_date = today
+        label = f"Last 3 Months ({start_date.isoformat()} to {end_date.isoformat()})"
+    elif filter_type == 'today':
         start_date = today
         end_date = today
         label = f"Today ({today.isoformat()})"
@@ -90,7 +98,7 @@ def resolve_date_range(query_params: dict):
         label = f"Custom ({start_date.isoformat()} to {end_date.isoformat()})"
     else:
         raise ValidationError({
-            'filter_type': f"Invalid filter_type '{filter_type}'. Allowed: today, yesterday, this_week, this_month, last_month, this_year, custom."
+            'filter_type': f"Invalid filter_type '{filter_type}'. Allowed: last_30_days, last_month, last_3_months, today, yesterday, this_week, this_month, this_year, custom."
         })
 
     # Convert local calendar days into UTC datetime boundaries

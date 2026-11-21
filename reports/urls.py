@@ -1,5 +1,6 @@
 from django.urls import path
 from .views import (
+    ReportUnifiedView,
     ReportOverviewView,
     ReportSalesView,
     ReportCollectionsView,
@@ -14,6 +15,7 @@ from .views import (
 )
 
 urlpatterns = [
+    path('unified/', ReportUnifiedView.as_view(), name='report-unified'),
     path('overview/', ReportOverviewView.as_view(), name='report-overview'),
     path('sales/', ReportSalesView.as_view(), name='report-sales'),
     path('collections/', ReportCollectionsView.as_view(), name='report-collections'),
