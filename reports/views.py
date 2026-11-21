@@ -2,6 +2,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import permissions, status
 from rest_framework.exceptions import ValidationError
+from rest_framework.renderers import BaseRenderer
 from django.http import HttpResponse
 
 from accounts.permissions import IsOwnerUser
@@ -9,6 +10,28 @@ from .utils import resolve_date_range
 from .engine import ReportsEngine
 from .pdf_generator import generate_report_pdf
 from .excel_generator import generate_report_excel
+
+
+class PassthroughBinaryRenderer(BaseRenderer):
+    """
+    Renders raw binary data for DRF content negotiation.
+    Matches the specific media_type or wildcard requests.
+    """
+    charset = None
+    render_style = 'binary'
+
+    def render(self, data, accepted_media_type=None, renderer_context=None):
+        return data
+
+
+class PassthroughPdfRenderer(PassthroughBinaryRenderer):
+    media_type = 'application/pdf'
+    format = 'pdf'
+
+
+class PassthroughExcelRenderer(PassthroughBinaryRenderer):
+    media_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    format = 'xlsx'
 
 
 class BaseReportView(APIView):
@@ -82,6 +105,8 @@ class ReportProfitLossView(BaseReportView):
 
 
 class ReportExportPdfView(BaseReportView):
+    renderer_classes = [PassthroughPdfRenderer]
+
     def get(self, request):
         report_type = request.query_params.get('report_type', 'sales').lower().strip()
         range_info = self.get_range_info(request)
@@ -114,6 +139,8 @@ class ReportExportPdfView(BaseReportView):
 
 
 class ReportExportExcelView(BaseReportView):
+    renderer_classes = [PassthroughExcelRenderer]
+
     def get(self, request):
         report_type = request.query_params.get('report_type', 'sales').lower().strip()
         range_info = self.get_range_info(request)
