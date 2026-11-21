@@ -35,6 +35,7 @@ class DraftBillingService:
         discount_amount=0,
         due_date=None,
         delivery_partner=None,
+        delivery_address: str = '',
         notes: str = '',
         created_by=None,
     ) -> DraftInvoice:
@@ -42,11 +43,25 @@ class DraftBillingService:
         Create a new draft invoice atomically:
         - items_data: list of dicts [{'product_id': int, 'product_name': str, 'unit': str, 'quantity': int, 'unit_price': Decimal}]
         - order_ids: list of order PKs to reserve (for single or consolidated order billing)
+        - delivery_address: destination address for delivery drafts
         """
         from decimal import Decimal
 
         if billing_source not in dict(DraftInvoice.BILLING_SOURCE_CHOICES):
             raise ValidationError({'billing_source': f"Invalid billing source '{billing_source}'."})
+
+        # Phase 5C.1 Validation: Deliverable Quick Billing drafts require a valid destination address
+        clean_delivery_address = (delivery_address or '').strip()
+        if billing_source == 'quick_billing' and delivery_partner:
+            if not customer:
+                if not clean_delivery_address:
+                    raise ValidationError({'delivery_address': "Delivery address is required when assigning a delivery partner to a walk-in customer."})
+            else:
+                effective_address = clean_delivery_address or (customer.address.strip() if customer.address else '')
+                if not effective_address:
+                    raise ValidationError({'delivery_address': "Delivery address is required for delivery orders. Customer has no saved address, please provide an address."})
+                if not clean_delivery_address and customer.address:
+                    clean_delivery_address = customer.address.strip()
 
         with transaction.atomic():
             # 1. Validate customer & orders
@@ -110,6 +125,7 @@ class DraftBillingService:
                 grand_total=Decimal('0.00'),
                 due_date=due_date,
                 delivery_partner=delivery_partner,
+                delivery_address=clean_delivery_address,
                 notes=notes,
                 created_by=created_by,
             )
@@ -179,6 +195,7 @@ class DraftBillingService:
         customer: Customer = None,
         delivery_partner=None,
         clear_delivery_partner: bool = False,
+        delivery_address: str = None,
         items_data: list = None,
         order_ids: list = None,
         discount_amount=None,
@@ -215,8 +232,24 @@ class DraftBillingService:
             elif delivery_partner is not None:
                 locked_draft.delivery_partner = delivery_partner
 
+            if delivery_address is not None:
+                locked_draft.delivery_address = delivery_address.strip()
+
             if notes is not None:
                 locked_draft.notes = notes
+
+            # Phase 5C.1 Validation on Update:
+            if locked_draft.billing_source == 'quick_billing' and locked_draft.delivery_partner:
+                eff_address = (locked_draft.delivery_address or '').strip()
+                if not locked_draft.customer:
+                    if not eff_address:
+                        raise ValidationError({'delivery_address': "Delivery address is required when assigning a delivery partner to a walk-in customer."})
+                else:
+                    if not eff_address and locked_draft.customer.address:
+                        eff_address = locked_draft.customer.address.strip()
+                        locked_draft.delivery_address = eff_address
+                    if not eff_address:
+                        raise ValidationError({'delivery_address': "Delivery address is required for delivery orders. Customer has no saved address, please provide an address."})
 
             # 2. Update order reservations if order_ids provided
             if order_ids is not None:
@@ -379,8 +412,10 @@ class DraftBillingService:
         company = draft.customer.company if (draft.customer and getattr(draft.customer, 'company', None)) else None
 
         delivery_address = ''
-        if draft.customer and draft.customer.address:
-            delivery_address = draft.customer.address
+        if draft.delivery_address and draft.delivery_address.strip():
+            delivery_address = draft.delivery_address.strip()
+        elif draft.customer and draft.customer.address and draft.customer.address.strip():
+            delivery_address = draft.customer.address.strip()
         else:
             delivery_address = "Walk-in / Counter Pickup"
 

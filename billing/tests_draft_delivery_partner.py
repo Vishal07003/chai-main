@@ -35,7 +35,7 @@ class Phase4A2DeliveryPartnerDraftSupportTests(TestCase):
 
         self.category = Category.objects.create(name='Snacks')
         self.samosa = Product.objects.create(name='Samosa', category=self.category, price='15.00', is_available=True)
-        self.customer = Customer.objects.create(name='Vikram Singh', phone='9811002233')
+        self.customer = Customer.objects.create(name='Vikram Singh', phone='9811002233', address='123 Commercial Street')
 
         # Active Partner 1
         self.partner_user1 = User.objects.create_user(username='driver_rajesh', password='Password123!')
