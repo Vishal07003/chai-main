@@ -278,14 +278,32 @@ class ReportsBackendEngineTests(TestCase):
         """PDF and Excel exports return valid binary payloads with appropriate headers."""
         self.client.force_authenticate(user=self.owner)
 
-        # Test PDF export
+        # Test PDF export with standard Accept header
         resp_pdf = self.client.get('/api/v1/reports/export/pdf/?report_type=sales&filter_type=today')
         self.assertEqual(resp_pdf.status_code, status.HTTP_200_OK)
         self.assertEqual(resp_pdf['Content-Type'], 'application/pdf')
+        self.assertTrue(resp_pdf.content.startswith(b'%PDF'))
         self.assertTrue(len(resp_pdf.content) > 1000)
 
-        # Test Excel export
+        # Test PDF export with application/json Accept header (verifies ForgivingContentNegotiation prevents 406)
+        resp_pdf_json_accept = self.client.get(
+            '/api/v1/reports/export/pdf/?report_type=sales&filter_type=today',
+            HTTP_ACCEPT='application/json, text/plain, */*'
+        )
+        self.assertEqual(resp_pdf_json_accept.status_code, status.HTTP_200_OK)
+        self.assertTrue(resp_pdf_json_accept.content.startswith(b'%PDF'))
+
+        # Test Excel export with standard Accept header
         resp_excel = self.client.get('/api/v1/reports/export/excel/?report_type=sales&filter_type=today')
         self.assertEqual(resp_excel.status_code, status.HTTP_200_OK)
         self.assertEqual(resp_excel['Content-Type'], 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        self.assertTrue(resp_excel.content.startswith(b'PK'))
         self.assertTrue(len(resp_excel.content) > 1000)
+
+        # Test Excel export with application/json Accept header
+        resp_excel_json_accept = self.client.get(
+            '/api/v1/reports/export/excel/?report_type=sales&filter_type=today',
+            HTTP_ACCEPT='application/json'
+        )
+        self.assertEqual(resp_excel_json_accept.status_code, status.HTTP_200_OK)
+        self.assertTrue(resp_excel_json_accept.content.startswith(b'PK'))

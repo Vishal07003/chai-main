@@ -1,8 +1,9 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import permissions, status
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import ValidationError, NotAcceptable
 from rest_framework.renderers import BaseRenderer
+from rest_framework.negotiation import DefaultContentNegotiation
 from django.http import HttpResponse
 
 from accounts.permissions import IsOwnerUser
@@ -10,6 +11,19 @@ from .utils import resolve_date_range
 from .engine import ReportsEngine
 from .pdf_generator import generate_report_pdf
 from .excel_generator import generate_report_excel
+
+
+class ForgivingContentNegotiation(DefaultContentNegotiation):
+    """
+    Ensures binary export endpoints always serve the requested binary payload
+    without failing with HTTP 406 Not Acceptable when clients (such as default
+    Axios / Fetch / RN clients) send Accept: application/json or general wildcards.
+    """
+    def select_renderer(self, request, renderers, format_suffix=None):
+        try:
+            return super().select_renderer(request, renderers, format_suffix)
+        except NotAcceptable:
+            return (renderers[0], renderers[0].media_type)
 
 
 class PassthroughBinaryRenderer(BaseRenderer):
@@ -106,6 +120,7 @@ class ReportProfitLossView(BaseReportView):
 
 class ReportExportPdfView(BaseReportView):
     renderer_classes = [PassthroughPdfRenderer]
+    content_negotiation_class = ForgivingContentNegotiation
 
     def get(self, request):
         report_type = request.query_params.get('report_type', 'sales').lower().strip()
@@ -140,6 +155,7 @@ class ReportExportPdfView(BaseReportView):
 
 class ReportExportExcelView(BaseReportView):
     renderer_classes = [PassthroughExcelRenderer]
+    content_negotiation_class = ForgivingContentNegotiation
 
     def get(self, request):
         report_type = request.query_params.get('report_type', 'sales').lower().strip()
