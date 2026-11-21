@@ -48,6 +48,7 @@ INSTALLED_APPS = [
     'deliveries.apps.DeliveriesConfig',
     'billing.apps.BillingConfig',
     'notifications.apps.NotificationsConfig',
+    'reports.apps.ReportsConfig',
 ]
 
 MIDDLEWARE = [

@@ -34,6 +34,7 @@ urlpatterns = [
     path('api/v1/deliveries/', include('deliveries.urls')),
     path('api/v1/billing/', include('billing.urls')),
     path('api/v1/notifications/', include('notifications.urls')),
+    path('api/v1/reports/', include('reports.urls')),
 ]
 
 if settings.DEBUG or True:
