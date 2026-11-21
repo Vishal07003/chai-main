@@ -42,7 +42,23 @@ def generate_report_excel(report_type: str, data: dict) -> bytes:
     current_row = 4
 
     # 2. Summary KPI Metrics
-    summary = data.get('summary', {})
+    if report_type == 'overview':
+        summary = {
+            'net_sales': data.get('net_sales', '0'),
+            'invoices_count': data.get('invoices_count', 0),
+            'total_collections': data.get('total_collections', '0'),
+            'total_outstanding': data.get('total_outstanding', '0'),
+            'overdue_outstanding': data.get('overdue_outstanding', '0'),
+            'defaulters_count': data.get('defaulters_count', 0),
+            'gross_profit': data.get('gross_profit', '0'),
+            'operating_expenses': data.get('operating_expenses', '0'),
+            'net_profit': data.get('net_profit', '0'),
+            'profit_margin_pct': f"{data.get('profit_margin_pct', '0')}%",
+            'cost_coverage': data.get('cost_coverage_status', 'N/A').title(),
+        }
+    else:
+        summary = data.get('summary', {})
+
     if summary:
         ws.cell(row=current_row, column=1, value="Summary Metrics").font = Font(name="Calibri", size=11, bold=True, color="8C331A")
         current_row += 1
@@ -64,7 +80,21 @@ def generate_report_excel(report_type: str, data: dict) -> bytes:
     headers = []
     rows = []
 
-    if report_type == 'sales' and 'invoices' in data:
+    normalized_type = report_type.lower().replace('_', '-')
+
+    if normalized_type == 'overview':
+        headers = ["Metric Category", "Key Indicator", "Amount / Count", "Business Context"]
+        ov_metrics = [
+            ["Sales & Revenue", "Net Realized Sales", f"₹{data.get('net_sales', '0')}", f"{data.get('invoices_count', 0)} finalized invoices"],
+            ["Cash Collections", "Total Payments Received", f"₹{data.get('total_collections', '0')}", "All cash, UPI and bank allocations"],
+            ["Receivables", "Total Outstanding Dues", f"₹{data.get('total_outstanding', '0')}", f"Overdue: ₹{data.get('overdue_outstanding', '0')} ({data.get('defaulters_count', 0)} defaulters)"],
+            ["Profitability", "Gross Profit", f"₹{data.get('gross_profit', '0')}", f"Operating Expenses: ₹{data.get('operating_expenses', '0')}"],
+            ["Net Performance", "Net Profit (P&L)", f"₹{data.get('net_profit', '0')}", f"Net Margin: {data.get('profit_margin_pct', '0')}% ({data.get('cost_coverage_status', 'N/A').title()} cost coverage)"],
+        ]
+        for row in ov_metrics:
+            rows.append(row)
+
+    elif normalized_type == 'sales' and 'invoices' in data:
         headers = ["Invoice #", "Date", "Customer Name", "Customer Phone", "Billing Source", "Status", "Subtotal (₹)", "Discount (₹)", "Grand Total (₹)"]
         for inv in data['invoices']:
             rows.append([
@@ -72,7 +102,7 @@ def generate_report_excel(report_type: str, data: dict) -> bytes:
                 inv['source'], inv['status'].upper(), float(inv['subtotal']), float(inv['discount_amount']), float(inv['grand_total'])
             ])
 
-    elif report_type == 'collections' and 'payments' in data:
+    elif normalized_type == 'collections' and 'payments' in data:
         headers = ["Payment ID", "Received At", "Customer / Account", "Method", "Reference Number", "Is Advance Credit?", "Advance Balance (₹)", "Amount Collected (₹)"]
         for p in data['payments']:
             rows.append([
@@ -80,7 +110,7 @@ def generate_report_excel(report_type: str, data: dict) -> bytes:
                 "Yes" if p['is_advance'] else "No", float(p['unallocated_advance']), float(p['amount'])
             ])
 
-    elif report_type == 'outstanding' and 'invoices' in data:
+    elif normalized_type == 'outstanding' and 'invoices' in data:
         headers = ["Invoice #", "Date", "Customer Name", "Customer Phone", "Due Date", "Is Overdue?", "Days Overdue", "Total Billed (₹)", "Amount Paid (₹)", "Pending Due (₹)"]
         for inv in data['invoices']:
             rows.append([
@@ -89,7 +119,7 @@ def generate_report_excel(report_type: str, data: dict) -> bytes:
                 float(inv['grand_total']), float(inv['total_paid']), float(inv['pending_amount'])
             ])
 
-    elif report_type == 'products' and 'products' in data:
+    elif normalized_type == 'products' and 'products' in data:
         headers = ["Product ID", "Product Name", "Units Sold", "Sales Value (₹)", "Total Cost (₹)", "Gross Margin (₹)", "Margin %", "Cost Available"]
         for prod in data['products']:
             rows.append([
@@ -100,14 +130,14 @@ def generate_report_excel(report_type: str, data: dict) -> bytes:
                 "Yes" if prod['cost_available'] else "No"
             ])
 
-    elif report_type == 'profit-loss' and 'expense_categories' in data:
+    elif normalized_type in ['profit-loss', 'profit_loss'] and 'expense_categories' in data:
         headers = ["Expense Category", "Category Key", "Transactions Count", "Total Amount (₹)"]
         for cat in data['expense_categories']:
             rows.append([
                 cat['category_display'], cat['category'], cat['count'], float(cat['total'])
             ])
 
-    elif report_type == 'deliveries' and 'partners' in data:
+    elif normalized_type == 'deliveries' and 'partners' in data:
         headers = ["Delivery Partner", "Total Assigned", "Delivered", "Failed", "Completion Rate %"]
         for prt in data['partners']:
             total = prt['total_assigned']
@@ -117,7 +147,7 @@ def generate_report_excel(report_type: str, data: dict) -> bytes:
                 prt['partner_name'], total, deliv, prt['failed'], f"{rate}%"
             ])
 
-    elif report_type == 'discounts' and 'invoices' in data:
+    elif normalized_type == 'discounts' and 'invoices' in data:
         headers = ["Invoice #", "Date", "Customer Name", "Subtotal (₹)", "Discount Amount (₹)", "Grand Total (₹)", "Discount %"]
         for inv in data['invoices']:
             rows.append([
@@ -125,7 +155,7 @@ def generate_report_excel(report_type: str, data: dict) -> bytes:
                 float(inv['subtotal']), float(inv['discount_amount']), float(inv['grand_total']), f"{inv['discount_pct']}%"
             ])
 
-    elif report_type == 'customers' and 'customers' in data:
+    elif normalized_type == 'customers' and 'customers' in data:
         headers = ["Customer ID", "Customer Name", "Phone", "Period Sales (₹)", "Period Collections (₹)", "Current Outstanding (₹)", "Invoices Count", "Last Purchase Date"]
         for c in data['customers']:
             rows.append([

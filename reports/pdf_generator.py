@@ -106,7 +106,8 @@ def generate_report_pdf(report_type: str, data: dict) -> bytes:
 
     # 1. Header
     now_str = timezone.now().astimezone(KOLKATA_TZ).strftime('%d %b %Y, %I:%M %p')
-    report_title = f"{report_type.replace('_', ' ').replace('-', ' ').title()} Report"
+    clean_type = report_type.replace('_', ' ').replace('-', ' ').title()
+    report_title = f"{clean_type} Report" if "Report" not in clean_type else clean_type
     date_label = data.get('date_filter', {}).get('label', '')
 
     header_data = [
@@ -125,12 +126,29 @@ def generate_report_pdf(report_type: str, data: dict) -> bytes:
     elements.append(Spacer(1, 6 * mm))
 
     # 2. Key Metrics Summary Box
-    summary = data.get('summary', {})
+    # If report_type is 'overview', summary metrics are top-level keys in data
+    if report_type == 'overview':
+        summary = {
+            'net_sales': data.get('net_sales', '0'),
+            'invoices_count': data.get('invoices_count', 0),
+            'total_collections': data.get('total_collections', '0'),
+            'total_outstanding': data.get('total_outstanding', '0'),
+            'overdue_outstanding': data.get('overdue_outstanding', '0'),
+            'defaulters_count': data.get('defaulters_count', 0),
+            'gross_profit': data.get('gross_profit', '0'),
+            'operating_expenses': data.get('operating_expenses', '0'),
+            'net_profit': data.get('net_profit', '0'),
+            'profit_margin_pct': f"{data.get('profit_margin_pct', '0')}%",
+            'cost_coverage': data.get('cost_coverage_status', 'N/A').title(),
+        }
+    else:
+        summary = data.get('summary', {})
+
     summary_cells = []
     for k, v in summary.items():
         if isinstance(v, (str, int, float, Decimal)):
             clean_k = k.replace('_', ' ').title()
-            val_str = f"₹{v}" if any(c in k for c in ['sales', 'subtotal', 'discount', 'cogs', 'profit', 'expenses', 'collections', 'outstanding']) else str(v)
+            val_str = f"₹{v}" if any(c in k for c in ['sales', 'subtotal', 'discount', 'cogs', 'profit', 'expenses', 'collections', 'outstanding']) and not str(v).endswith('%') else str(v)
             summary_cells.append(Paragraph(f"<b>{clean_k}</b><br/>{val_str}", meta_style))
 
     if summary_cells:
@@ -140,7 +158,7 @@ def generate_report_pdf(report_type: str, data: dict) -> bytes:
         while rows and len(rows[-1]) < 4:
             rows[-1].append(Paragraph("", meta_style))
 
-        sum_table = Table(rows, colWidths=[66 * mm] * 4)
+        sum_table = Table(rows, colWidths=[66.7 * mm] * 4)
         sum_table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#FAF6F2')),
             ('BOX', (0, 0), (-1, -1), 1, colors.HexColor('#EFEAE4')),
@@ -157,7 +175,33 @@ def generate_report_pdf(report_type: str, data: dict) -> bytes:
     table_rows = []
     col_widths = []
 
-    if report_type == 'sales' and 'invoices' in data:
+    normalized_type = report_type.lower().replace('_', '-')
+
+    if normalized_type == 'overview':
+        # Overview Executive Breakdown Table
+        table_rows.append([
+            Paragraph("Metric Category", cell_head_style),
+            Paragraph("Key Indicator", cell_head_style),
+            Paragraph("Recorded Amount / Count", cell_head_style),
+            Paragraph("Business Context", cell_head_style),
+        ])
+        col_widths = [60 * mm, 65 * mm, 60 * mm, 82 * mm]
+        ov_metrics = [
+            ("Sales & Revenue", "Net Realized Sales", f"₹{data.get('net_sales', '0')}", f"{data.get('invoices_count', 0)} finalized invoices"),
+            ("Cash Collections", "Total Payments Received", f"₹{data.get('total_collections', '0')}", "All cash, UPI and bank allocations"),
+            ("Receivables", "Total Outstanding Dues", f"₹{data.get('total_outstanding', '0')}", f"Overdue: ₹{data.get('overdue_outstanding', '0')} ({data.get('defaulters_count', 0)} defaulters)"),
+            ("Profitability", "Gross Profit", f"₹{data.get('gross_profit', '0')}", f"Operating Expenses: ₹{data.get('operating_expenses', '0')}"),
+            ("Net Performance", "Net Profit (P&L)", f"₹{data.get('net_profit', '0')}", f"Net Margin: {data.get('profit_margin_pct', '0')}% ({data.get('cost_coverage_status', 'N/A').title()} cost coverage)"),
+        ]
+        for cat, ind, amt, ctx in ov_metrics:
+            table_rows.append([
+                Paragraph(f"<b>{cat}</b>", cell_body_style),
+                Paragraph(ind, cell_body_style),
+                Paragraph(f"<b>{amt}</b>", cell_body_style),
+                Paragraph(ctx, cell_body_style),
+            ])
+
+    elif normalized_type == 'sales' and 'invoices' in data:
         table_rows.append([
             Paragraph("Invoice #", cell_head_style),
             Paragraph("Date", cell_head_style),
@@ -168,7 +212,7 @@ def generate_report_pdf(report_type: str, data: dict) -> bytes:
             Paragraph("Grand Total", cell_head_style),
         ])
         col_widths = [40 * mm, 35 * mm, 65 * mm, 38 * mm, 26 * mm, 28 * mm, 35 * mm]
-        for inv in data['invoices'][:150]:
+        for inv in data['invoices'][:250]:
             table_rows.append([
                 Paragraph(inv['invoice_number'], cell_body_style),
                 Paragraph(inv['created_at'], cell_body_style),
@@ -179,7 +223,7 @@ def generate_report_pdf(report_type: str, data: dict) -> bytes:
                 Paragraph(f"₹{inv['grand_total']}", cell_body_style),
             ])
 
-    elif report_type == 'collections' and 'payments' in data:
+    elif normalized_type == 'collections' and 'payments' in data:
         table_rows.append([
             Paragraph("ID", cell_head_style),
             Paragraph("Received At", cell_head_style),
@@ -190,7 +234,7 @@ def generate_report_pdf(report_type: str, data: dict) -> bytes:
             Paragraph("Amount Paid", cell_head_style),
         ])
         col_widths = [20 * mm, 40 * mm, 70 * mm, 35 * mm, 40 * mm, 30 * mm, 32 * mm]
-        for p in data['payments'][:150]:
+        for p in data['payments'][:250]:
             table_rows.append([
                 Paragraph(str(p['id']), cell_body_style),
                 Paragraph(p['received_at'], cell_body_style),
@@ -201,7 +245,7 @@ def generate_report_pdf(report_type: str, data: dict) -> bytes:
                 Paragraph(f"₹{p['amount']}", cell_body_style),
             ])
 
-    elif report_type == 'outstanding' and 'invoices' in data:
+    elif normalized_type == 'outstanding' and 'invoices' in data:
         table_rows.append([
             Paragraph("Invoice #", cell_head_style),
             Paragraph("Date", cell_head_style),
@@ -212,7 +256,7 @@ def generate_report_pdf(report_type: str, data: dict) -> bytes:
             Paragraph("Pending Amount", cell_head_style),
         ])
         col_widths = [40 * mm, 30 * mm, 65 * mm, 32 * mm, 30 * mm, 35 * mm, 35 * mm]
-        for inv in data['invoices'][:150]:
+        for inv in data['invoices'][:250]:
             table_rows.append([
                 Paragraph(inv['invoice_number'], cell_body_style),
                 Paragraph(inv['created_at'], cell_body_style),
@@ -223,7 +267,7 @@ def generate_report_pdf(report_type: str, data: dict) -> bytes:
                 Paragraph(f"₹{inv['pending_amount']}", cell_body_style),
             ])
 
-    elif report_type == 'products' and 'products' in data:
+    elif normalized_type == 'products' and 'products' in data:
         table_rows.append([
             Paragraph("Product Name", cell_head_style),
             Paragraph("Units Sold", cell_head_style),
@@ -234,7 +278,7 @@ def generate_report_pdf(report_type: str, data: dict) -> bytes:
             Paragraph("Cost Availability", cell_head_style),
         ])
         col_widths = [75 * mm, 28 * mm, 36 * mm, 36 * mm, 36 * mm, 26 * mm, 30 * mm]
-        for prod in data['products'][:150]:
+        for prod in data['products'][:250]:
             table_rows.append([
                 Paragraph(prod['product_name'], cell_body_style),
                 Paragraph(str(prod['units_sold']), cell_body_style),
@@ -245,7 +289,7 @@ def generate_report_pdf(report_type: str, data: dict) -> bytes:
                 Paragraph("Captured" if prod['cost_available'] else "Missing", cell_body_style),
             ])
 
-    elif report_type == 'profit-loss' and 'expense_categories' in data:
+    elif normalized_type in ['profit-loss', 'profit_loss'] and 'expense_categories' in data:
         table_rows.append([
             Paragraph("Expense Category", cell_head_style),
             Paragraph("Transactions Count", cell_head_style),
@@ -257,6 +301,71 @@ def generate_report_pdf(report_type: str, data: dict) -> bytes:
                 Paragraph(cat['category_display'], cell_body_style),
                 Paragraph(str(cat['count']), cell_body_style),
                 Paragraph(f"₹{cat['total']}", cell_body_style),
+            ])
+
+    elif normalized_type == 'customers' and 'customers' in data:
+        table_rows.append([
+            Paragraph("Customer Name", cell_head_style),
+            Paragraph("Phone", cell_head_style),
+            Paragraph("Period Sales", cell_head_style),
+            Paragraph("Period Collections", cell_head_style),
+            Paragraph("Current Dues", cell_head_style),
+            Paragraph("Invoices Count", cell_head_style),
+            Paragraph("Last Purchase", cell_head_style),
+        ])
+        col_widths = [55 * mm, 32 * mm, 36 * mm, 38 * mm, 36 * mm, 30 * mm, 40 * mm]
+        for c in data['customers'][:250]:
+            table_rows.append([
+                Paragraph(c['customer_name'], cell_body_style),
+                Paragraph(c['customer_phone'] or '-', cell_body_style),
+                Paragraph(f"₹{c['period_sales']}", cell_body_style),
+                Paragraph(f"₹{c['period_collections']}", cell_body_style),
+                Paragraph(f"₹{c['current_outstanding']}", cell_body_style),
+                Paragraph(str(c['period_invoices_count']), cell_body_style),
+                Paragraph(c['last_purchase_date'] or '-', cell_body_style),
+            ])
+
+    elif normalized_type == 'deliveries' and 'partners' in data:
+        table_rows.append([
+            Paragraph("Delivery Partner", cell_head_style),
+            Paragraph("Total Assigned", cell_head_style),
+            Paragraph("Delivered", cell_head_style),
+            Paragraph("Failed", cell_head_style),
+            Paragraph("Completion Rate %", cell_head_style),
+        ])
+        col_widths = [87 * mm, 45 * mm, 45 * mm, 45 * mm, 45 * mm]
+        for prt in data['partners']:
+            total = prt['total_assigned']
+            deliv = prt['delivered']
+            rate = round((deliv / total * 100), 1) if total > 0 else 0.0
+            table_rows.append([
+                Paragraph(prt['partner_name'], cell_body_style),
+                Paragraph(str(total), cell_body_style),
+                Paragraph(str(deliv), cell_body_style),
+                Paragraph(str(prt['failed']), cell_body_style),
+                Paragraph(f"{rate}%", cell_body_style),
+            ])
+
+    elif normalized_type == 'discounts' and 'invoices' in data:
+        table_rows.append([
+            Paragraph("Invoice #", cell_head_style),
+            Paragraph("Date", cell_head_style),
+            Paragraph("Customer Name", cell_head_style),
+            Paragraph("Subtotal", cell_head_style),
+            Paragraph("Discount Amount", cell_head_style),
+            Paragraph("Grand Total", cell_head_style),
+            Paragraph("Discount %", cell_head_style),
+        ])
+        col_widths = [38 * mm, 32 * mm, 65 * mm, 35 * mm, 35 * mm, 35 * mm, 27 * mm]
+        for inv in data['invoices'][:250]:
+            table_rows.append([
+                Paragraph(inv['invoice_number'], cell_body_style),
+                Paragraph(inv['created_at'], cell_body_style),
+                Paragraph(inv['customer_name'], cell_body_style),
+                Paragraph(f"₹{inv['subtotal']}", cell_body_style),
+                Paragraph(f"₹{inv['discount_amount']}", cell_body_style),
+                Paragraph(f"₹{inv['grand_total']}", cell_body_style),
+                Paragraph(f"{inv['discount_pct']}%", cell_body_style),
             ])
 
     if table_rows:
@@ -274,6 +383,10 @@ def generate_report_pdf(report_type: str, data: dict) -> bytes:
             ('RIGHTPADDING', (0, 0), (-1, -1), 5),
         ]))
         elements.append(data_table)
+    else:
+        # Fallback empty state notice so PDF body is never blank
+        no_data_para = Paragraph("<i>No data records found for this report period.</i>", meta_style)
+        elements.append(no_data_para)
 
     doc.build(elements, canvasmaker=ReportNumberedCanvas)
     return buffer.getvalue()
