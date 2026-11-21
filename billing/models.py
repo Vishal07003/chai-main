@@ -337,6 +337,11 @@ class DraftInvoice(models.Model):
         related_name='draft_invoices',
         help_text="Optional Delivery Partner selected for this draft"
     )
+    delivery_address = models.TextField(
+        blank=True,
+        default='',
+        help_text="Specific delivery destination address for this draft (required if delivery partner assigned to walk-in customer)"
+    )
     official_invoice = models.OneToOneField(
         Invoice,
         on_delete=models.SET_NULL,

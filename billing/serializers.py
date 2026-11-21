@@ -413,6 +413,7 @@ class DraftInvoiceDetailSerializer(serializers.ModelSerializer):
             'id', 'draft_number', 'customer', 'customer_name', 'customer_phone',
             'billing_source', 'status', 'subtotal', 'discount_amount', 'grand_total',
             'due_date', 'notes', 'delivery_partner', 'delivery_partner_id', 'delivery_partner_name',
+            'delivery_address',
             'expires_at', 'created_by', 'created_by_name',
             'official_invoice', 'official_invoice_number', 'created_at', 'updated_at',
             'items', 'draft_orders'
@@ -436,6 +437,7 @@ class DraftInvoiceItemInputSerializer(serializers.Serializer):
 class DraftInvoiceCreateSerializer(serializers.Serializer):
     customer_id = serializers.IntegerField(required=False, allow_null=True)
     delivery_partner_id = serializers.IntegerField(required=False, allow_null=True)
+    delivery_address = serializers.CharField(required=False, allow_blank=True, default='')
     billing_source = serializers.ChoiceField(
         choices=DraftInvoice.BILLING_SOURCE_CHOICES, default='quick_billing'
     )
@@ -464,6 +466,9 @@ class DraftInvoiceCreateSerializer(serializers.Serializer):
         billing_source = attrs.get('billing_source', 'quick_billing')
         order_ids = attrs.get('order_ids', [])
         items = attrs.get('items', [])
+        delivery_partner_id = attrs.get('delivery_partner_id')
+        customer_id = attrs.get('customer_id')
+        delivery_address = (attrs.get('delivery_address') or '').strip()
 
         if billing_source in ('single_order', 'consolidated_orders') and not order_ids:
             raise serializers.ValidationError({
@@ -475,12 +480,31 @@ class DraftInvoiceCreateSerializer(serializers.Serializer):
                 'items': "At least one product item is required for Quick Billing drafts."
             })
 
+        # Phase 5C.1 Validation: Quick billing drafts with assigned delivery partner require a valid destination address
+        if billing_source == 'quick_billing' and delivery_partner_id is not None:
+            if not customer_id:
+                # Walk-in customer
+                if not delivery_address:
+                    raise serializers.ValidationError({
+                        'delivery_address': "Delivery address is required when assigning a delivery partner to a walk-in customer."
+                    })
+            else:
+                # Registered customer
+                from billing.models import Customer
+                cust = Customer.objects.filter(id=customer_id).first()
+                effective_address = delivery_address or (cust.address.strip() if (cust and cust.address) else '')
+                if not effective_address:
+                    raise serializers.ValidationError({
+                        'delivery_address': "Delivery address is required for delivery orders. Customer has no saved address, please provide an address."
+                    })
+
         return attrs
 
 
 class DraftInvoiceUpdateSerializer(serializers.Serializer):
     customer_id = serializers.IntegerField(required=False, allow_null=True)
     delivery_partner_id = serializers.IntegerField(required=False, allow_null=True)
+    delivery_address = serializers.CharField(required=False, allow_blank=True)
     items = DraftInvoiceItemInputSerializer(many=True, required=False)
     order_ids = serializers.ListField(
         child=serializers.IntegerField(), required=False

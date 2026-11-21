@@ -117,11 +117,12 @@ class Phase5BFulfillmentDeliveryDispatchTests(TestCase):
         self.assertEqual(Delivery.objects.count(), delivery_count_before)
 
     def test_3_walkin_draft_with_partner_creates_valid_fulfillment_order(self):
-        """3. Walk-in draft with partner creates a valid fulfillment Order with fallback customer."""
+        """3. Walk-in draft with partner creates a valid fulfillment Order with required delivery_address."""
         draft = DraftBillingService.create_draft(
             customer=None,
             billing_source='quick_billing',
             delivery_partner=self.partner,
+            delivery_address="Plot 55, Cyber City, Gate 3",
             items_data=[{'product_id': self.samosa.id, 'quantity': 4, 'unit_price': Decimal('15.00')}],
             created_by=self.owner,
         )
@@ -131,7 +132,7 @@ class Phase5BFulfillmentDeliveryDispatchTests(TestCase):
         order = inv.order
         self.assertIsNone(order.customer_profile)
         self.assertEqual(order.customer, self.owner)
-        self.assertEqual(order.delivery_address, "Walk-in / Counter Pickup")
+        self.assertEqual(order.delivery_address, "Plot 55, Cyber City, Gate 3")
         self.assertEqual(order.delivery.driver, self.driver_user)
 
     def test_4_registered_customer_draft_maps_customer_profile(self):

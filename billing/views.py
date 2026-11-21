@@ -591,6 +591,7 @@ class DraftInvoiceViewSet(viewsets.ModelViewSet):
             discount_amount=data.get('discount_amount', Decimal('0.00')),
             due_date=data.get('due_date'),
             delivery_partner=delivery_partner,
+            delivery_address=data.get('delivery_address', ''),
             notes=data.get('notes', ''),
             created_by=request.user,
         )
@@ -621,6 +622,7 @@ class DraftInvoiceViewSet(viewsets.ModelViewSet):
             customer=customer if customer_id is not None else None,
             delivery_partner=delivery_partner,
             clear_delivery_partner=clear_delivery_partner,
+            delivery_address=data.get('delivery_address'),
             items_data=data.get('items'),
             order_ids=data.get('order_ids'),
             discount_amount=data.get('discount_amount'),
