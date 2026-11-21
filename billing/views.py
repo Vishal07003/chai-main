@@ -50,7 +50,7 @@ from .serializers import (
     DraftFinalizeSerializer,
     ExpenseSerializer,
 )
-from .pdf_generator import generate_invoice_pdf
+from .pdf_generator import generate_invoice_pdf, generate_payment_receipt_pdf
 from .ledger_service import LedgerService
 from .payment_service import PaymentAllocationService
 from .draft_service import DraftBillingService
@@ -705,4 +705,47 @@ class ExpenseViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         serializer.save(recorded_by=self.request.user)
+
+
+class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    Payments ViewSet:
+    - Lists and retrieves payment collections for authorized owners/staff.
+    - Generates branded PDF payment receipts.
+    - Preserves business authorization and ownership controls.
+    """
+    queryset = Payment.objects.all().select_related('customer', 'company', 'invoice').prefetch_related('allocations__invoice')
+    serializer_class = PaymentSerializer
+    permission_classes = [permissions.IsAuthenticated, IsOwnerUser]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        customer_id = self.request.query_params.get('customer')
+        method = self.request.query_params.get('method')
+        date_param = self.request.query_params.get('date')
+
+        if customer_id:
+            queryset = queryset.filter(customer_id=customer_id)
+        if method:
+            queryset = queryset.filter(method=method)
+        if date_param:
+            queryset = queryset.filter(received_at__date=date_param)
+
+        return queryset
+
+    @action(detail=True, methods=['get'], renderer_classes=[PassthroughPdfRenderer])
+    def receipt(self, request, pk=None):
+        """
+        GET /api/v1/billing/payments/{id}/receipt/
+        Generates and streams an individual branded PDF payment receipt.
+        """
+        payment = self.get_object()
+        pdf_bytes = generate_payment_receipt_pdf(payment)
+
+        filename = f"ChaiFlow_Receipt_{payment.id}_{payment.received_at.strftime('%Y-%m-%d')}.pdf"
+        response = HttpResponse(pdf_bytes, content_type='application/pdf')
+        response['Content-Disposition'] = f'inline; filename="{filename}"'
+        response['Content-Length'] = len(pdf_bytes)
+        return response
+
 

@@ -6,7 +6,6 @@ from openpyxl.utils import get_column_letter
 from django.utils import timezone
 from .utils import KOLKATA_TZ
 
-
 def generate_report_excel(report_type: str, data: dict) -> bytes:
     """
     Renders professional, formatted Excel (.xlsx) workbook for any Chai Flow report.

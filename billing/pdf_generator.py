@@ -342,9 +342,9 @@ def generate_invoice_pdf(invoice) -> bytes:
     items_data = [[
         Paragraph("Sr.", table_header_center_style),
         Paragraph("Product Description", table_header_style),
-        Paragraph("Unit Price (₹)", table_header_right_style),
+        Paragraph("Unit Price (Rs.)", table_header_right_style),
         Paragraph("Quantity", table_header_center_style),
-        Paragraph("Total Amount (₹)", table_header_right_style),
+        Paragraph("Total Amount (Rs.)", table_header_right_style),
     ]]
 
     invoice_items = list(invoice.items.all().order_by('id'))
@@ -457,7 +457,7 @@ def generate_invoice_pdf(invoice) -> bytes:
     summary_rows = [
         [
             Paragraph("Subtotal", summary_label_style),
-            Paragraph(f"₹ {invoice.subtotal:.2f}", summary_value_style),
+            Paragraph(f"Rs. {invoice.subtotal:.2f}", summary_value_style),
         ],
     ]
 
@@ -465,17 +465,17 @@ def generate_invoice_pdf(invoice) -> bytes:
     if hasattr(invoice, 'discount_amount') and invoice.discount_amount and Decimal(str(invoice.discount_amount)) > 0:
         summary_rows.append([
             Paragraph("Discount", summary_label_style),
-            Paragraph(f"- ₹ {Decimal(str(invoice.discount_amount)):.2f}", summary_value_style),
+            Paragraph(f"- Rs. {Decimal(str(invoice.discount_amount)):.2f}", summary_value_style),
         ])
 
     summary_rows.extend([
         [
             Paragraph("Grand Total", grand_total_label_style),
-            Paragraph(f"₹ {invoice.grand_total:.2f}", grand_total_value_style),
+            Paragraph(f"Rs. {invoice.grand_total:.2f}", grand_total_value_style),
         ],
         [
             Paragraph("Amount Received", summary_label_style),
-            Paragraph(f"₹ {total_paid:.2f}", summary_value_style),
+            Paragraph(f"Rs. {total_paid:.2f}", summary_value_style),
         ],
         [
             Paragraph("Payment Method", summary_label_style),
@@ -483,7 +483,7 @@ def generate_invoice_pdf(invoice) -> bytes:
         ],
         [
             Paragraph("Remaining Due", grand_total_label_style),
-            Paragraph(f"₹ {pending_amount:.2f}", remaining_due_value_style),
+            Paragraph(f"Rs. {pending_amount:.2f}", remaining_due_value_style),
         ],
     ])
 
@@ -538,5 +538,398 @@ def generate_invoice_pdf(invoice) -> bytes:
     # Build PDF using NumberedCanvas
     doc.build(story, canvasmaker=NumberedCanvas)
     return buffer.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Branded Payment Receipt Generator
+# ---------------------------------------------------------------------------
+
+_RECEIPT_FONT_INITIALIZED = False
+_RECEIPT_FONT_NAME = "Helvetica"
+_RECEIPT_FONT_BOLD = "Helvetica-Bold"
+_RECEIPT_CURRENCY_SYMBOL = "₹"
+
+def _init_receipt_fonts():
+    global _RECEIPT_FONT_INITIALIZED, _RECEIPT_FONT_NAME, _RECEIPT_FONT_BOLD, _RECEIPT_CURRENCY_SYMBOL
+    if _RECEIPT_FONT_INITIALIZED:
+        return
+
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    # Priority font candidates that support Unicode ₹ (U+20B9)
+    candidates = [
+        # Linux / Docker paths
+        ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+        ("/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf", "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf"),
+        # Windows paths
+        (r"C:\Windows\Fonts\arial.ttf", r"C:\Windows\Fonts\arialbd.ttf"),
+        (r"C:\Windows\Fonts\segoeui.ttf", r"C:\Windows\Fonts\segoeuib.ttf"),
+        (r"C:\Windows\Fonts\calibri.ttf", r"C:\Windows\Fonts\calibrib.ttf"),
+    ]
+
+    for reg_path, bold_path in candidates:
+        if os.path.exists(reg_path) and os.path.exists(bold_path):
+            try:
+                pdfmetrics.registerFont(TTFont("ReceiptFont", reg_path))
+                pdfmetrics.registerFont(TTFont("ReceiptFont-Bold", bold_path))
+                _RECEIPT_FONT_NAME = "ReceiptFont"
+                _RECEIPT_FONT_BOLD = "ReceiptFont-Bold"
+                _RECEIPT_CURRENCY_SYMBOL = "₹"
+                _RECEIPT_FONT_INITIALIZED = True
+                return
+            except Exception:
+                pass
+
+    # Standard fallback
+    _RECEIPT_FONT_NAME = "Helvetica"
+    _RECEIPT_FONT_BOLD = "Helvetica-Bold"
+    _RECEIPT_CURRENCY_SYMBOL = "Rs. "
+    _RECEIPT_FONT_INITIALIZED = True
+
+
+def generate_payment_receipt_pdf(payment) -> bytes:
+    """
+    Generate professional branded A4 PDF Payment Receipt for an individual Payment.
+    Brand:
+      - Primary: #8C331A
+      - Background: #FFFFFF / #FAF8F5
+      - Success: #16865B
+    Includes:
+      - Header & Brand styling
+      - Payment Details (amount, method, reference, date, customer)
+      - Allocations Table (invoice numbers, amounts)
+      - Partial or Advance credit handling
+      - Footer (Thank-you note & timestamp)
+    """
+    _init_receipt_fonts()
+
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        leftMargin=15 * mm,
+        rightMargin=15 * mm,
+        topMargin=15 * mm,
+        bottomMargin=20 * mm,
+    )
+
+    PRIMARY = colors.HexColor("#8C331A")
+    SUCCESS = colors.HexColor("#16865B")
+    NEUTRAL_DARK = colors.HexColor("#2C201A")
+    NEUTRAL_MUTED = colors.HexColor("#6B5E55")
+    NEUTRAL_LIGHT = colors.HexColor("#FAF8F5")
+    BORDER_COLOR = colors.HexColor("#EFEAE4")
+
+    styles = getSampleStyleSheet()
+
+    # Custom Typography
+    brand_style = ParagraphStyle(
+        'ReceiptBrand',
+        parent=styles['Normal'],
+        fontName=_RECEIPT_FONT_BOLD,
+        fontSize=20,
+        leading=24,
+        textColor=PRIMARY,
+    )
+    title_style = ParagraphStyle(
+        'ReceiptTitle',
+        parent=styles['Normal'],
+        fontName=_RECEIPT_FONT_BOLD,
+        fontSize=15,
+        leading=18,
+        textColor=PRIMARY,
+        alignment=2,  # Right-aligned
+    )
+    title_sub_style = ParagraphStyle(
+        'ReceiptTitleSub',
+        parent=styles['Normal'],
+        fontName=_RECEIPT_FONT_NAME,
+        fontSize=9,
+        leading=13,
+        textColor=NEUTRAL_MUTED,
+        alignment=2,
+    )
+    badge_style = ParagraphStyle(
+        'ReceiptBadge',
+        parent=styles['Normal'],
+        fontName=_RECEIPT_FONT_BOLD,
+        fontSize=9,
+        leading=12,
+        textColor=SUCCESS,
+        alignment=2,
+    )
+    meta_label_style = ParagraphStyle(
+        'ReceiptMetaLabel',
+        parent=styles['Normal'],
+        fontName=_RECEIPT_FONT_BOLD,
+        fontSize=8,
+        leading=11,
+        textColor=NEUTRAL_MUTED,
+    )
+    meta_value_style = ParagraphStyle(
+        'ReceiptMetaValue',
+        parent=styles['Normal'],
+        fontName=_RECEIPT_FONT_BOLD,
+        fontSize=9.5,
+        leading=13,
+        textColor=NEUTRAL_DARK,
+    )
+    hero_amount_style = ParagraphStyle(
+        'ReceiptHeroAmount',
+        parent=styles['Normal'],
+        fontName=_RECEIPT_FONT_BOLD,
+        fontSize=22,
+        leading=26,
+        textColor=SUCCESS,
+    )
+    hero_label_style = ParagraphStyle(
+        'ReceiptHeroLabel',
+        parent=styles['Normal'],
+        fontName=_RECEIPT_FONT_BOLD,
+        fontSize=8.5,
+        leading=11,
+        textColor=NEUTRAL_MUTED,
+    )
+    section_head_style = ParagraphStyle(
+        'ReceiptSectionHead',
+        parent=styles['Normal'],
+        fontName=_RECEIPT_FONT_BOLD,
+        fontSize=10,
+        leading=14,
+        textColor=PRIMARY,
+    )
+    table_head_style = ParagraphStyle(
+        'ReceiptTableHead',
+        parent=styles['Normal'],
+        fontName=_RECEIPT_FONT_BOLD,
+        fontSize=8.5,
+        leading=11,
+        textColor=colors.white,
+    )
+    table_head_right = ParagraphStyle(
+        'ReceiptTableHeadRight',
+        parent=styles['Normal'],
+        fontName=_RECEIPT_FONT_BOLD,
+        fontSize=8.5,
+        leading=11,
+        textColor=colors.white,
+        alignment=2,
+    )
+    table_cell_style = ParagraphStyle(
+        'ReceiptTableCell',
+        parent=styles['Normal'],
+        fontName=_RECEIPT_FONT_NAME,
+        fontSize=8.5,
+        leading=12,
+        textColor=NEUTRAL_DARK,
+    )
+    table_cell_right = ParagraphStyle(
+        'ReceiptTableCellRight',
+        parent=styles['Normal'],
+        fontName=_RECEIPT_FONT_NAME,
+        fontSize=8.5,
+        leading=12,
+        textColor=NEUTRAL_DARK,
+        alignment=2,
+    )
+    notes_style = ParagraphStyle(
+        'ReceiptNotes',
+        parent=styles['Normal'],
+        fontName=_RECEIPT_FONT_NAME,
+        fontSize=8.5,
+        leading=12,
+        textColor=NEUTRAL_MUTED,
+    )
+
+    story = []
+
+    # 1. Top Header Bar
+    sym = _RECEIPT_CURRENCY_SYMBOL
+    receipt_no = f"RCT-{payment.id:06d}"
+    formatted_date = payment.received_at.strftime("%d %b %Y, %I:%M %p")
+
+    header_left = [
+        Paragraph("<b>CHAI FLOW</b>", brand_style),
+        Spacer(1, 1 * mm),
+        Paragraph("Smart Tea Supply & Delivery Network", ParagraphStyle('Tag', parent=styles['Normal'], fontName=_RECEIPT_FONT_NAME, fontSize=9, textColor=NEUTRAL_MUTED)),
+    ]
+    header_right = [
+        Paragraph("PAYMENT RECEIPT", title_style),
+        Spacer(1, 1 * mm),
+        Paragraph(f"Receipt No: <b>{receipt_no}</b>", title_sub_style),
+        Paragraph(f"Payment ID: <b>#{payment.id}</b>", title_sub_style),
+        Spacer(1, 1 * mm),
+        Paragraph("● PAYMENT RECEIVED", badge_style),
+    ]
+
+    header_table = Table([[header_left, header_right]], colWidths=[100 * mm, 80 * mm])
+    header_table.setStyle(TableStyle([
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ('LEFTPADDING', (0, 0), (-1, -1), 0),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+        ('TOPPADDING', (0, 0), (-1, -1), 0),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
+        ('LINEBELOW', (0, 0), (-1, -1), 1.5, PRIMARY),
+    ]))
+    story.append(header_table)
+    story.append(Spacer(1, 5 * mm))
+
+    # 2. Customer & Hero Amount Card
+    cust = payment.customer
+    comp = payment.company
+    customer_name = cust.name if cust else (comp.name if comp else "Customer Account")
+    customer_phone = cust.phone if cust else (comp.phone if comp else "N/A")
+    customer_address = cust.address if cust else (comp.address if comp else "")
+
+    customer_info = [
+        Paragraph("RECEIVED FROM", meta_label_style),
+        Spacer(1, 1 * mm),
+        Paragraph(customer_name, ParagraphStyle('CN', parent=styles['Normal'], fontName=_RECEIPT_FONT_BOLD, fontSize=12, textColor=NEUTRAL_DARK)),
+        Spacer(1, 1 * mm),
+        Paragraph(f"Phone: {customer_phone}", meta_value_style),
+    ]
+    if customer_address:
+        customer_info.append(Paragraph(f"Address: {customer_address}", notes_style))
+
+    method_display = dict(payment.METHOD_CHOICES).get(payment.method, payment.method.title())
+    payment_amount_str = f"{sym}{Decimal(str(payment.amount)):,.2f}"
+
+    amount_box = [
+        Paragraph("TOTAL AMOUNT RECEIVED", hero_label_style),
+        Spacer(1, 1.5 * mm),
+        Paragraph(payment_amount_str, hero_amount_style),
+        Spacer(1, 2 * mm),
+        Paragraph(f"Date: <b>{formatted_date}</b>", meta_value_style),
+        Paragraph(f"Method: <b>{method_display}</b>", meta_value_style),
+    ]
+    if payment.reference_number:
+        amount_box.append(Paragraph(f"Reference: <b>{payment.reference_number}</b>", meta_value_style))
+
+    overview_table = Table([[customer_info, amount_box]], colWidths=[100 * mm, 80 * mm])
+    overview_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, -1), NEUTRAL_LIGHT),
+        ('BOX', (0, 0), (-1, -1), 0.75, BORDER_COLOR),
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ('LEFTPADDING', (0, 0), (-1, -1), 10),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 10),
+        ('TOPPADDING', (0, 0), (-1, -1), 8),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+    ]))
+    story.append(overview_table)
+    story.append(Spacer(1, 6 * mm))
+
+    # 3. Allocation Breakdown Section
+    story.append(Paragraph("PAYMENT ALLOCATION BREAKDOWN", section_head_style))
+    story.append(Spacer(1, 2.5 * mm))
+
+    allocations = list(payment.allocations.select_related('invoice').all().order_by('id'))
+    total_allocated = payment.total_allocated
+    unallocated_amount = payment.unallocated_amount
+
+    alloc_rows = [
+        [
+            Paragraph("Type / Reference", table_head_style),
+            Paragraph("Invoice / Account Description", table_head_style),
+            Paragraph("Allocated Date", table_head_style),
+            Paragraph(f"Amount ({sym.strip()})", table_head_right),
+        ]
+    ]
+
+    if allocations:
+        for idx, alloc in enumerate(allocations, 1):
+            inv = alloc.invoice
+            inv_ref = inv.invoice_number or f"INV-{inv.id}"
+            inv_date = inv.created_at.strftime("%d %b %Y") if inv.created_at else "-"
+            alloc_date = alloc.allocated_at.strftime("%d %b %Y") if hasattr(alloc, 'allocated_at') and alloc.allocated_at else "-"
+            alloc_rows.append([
+                Paragraph(f"Invoice Allocation #{idx}", table_cell_style),
+                Paragraph(f"<b>{inv_ref}</b> (Bill Date: {inv_date})", table_cell_style),
+                Paragraph(alloc_date, table_cell_style),
+                Paragraph(f"{sym}{Decimal(str(alloc.allocated_amount)):,.2f}", table_cell_right),
+            ])
+    elif payment.invoice:
+        # Direct invoice payment without explicit allocation record
+        inv = payment.invoice
+        inv_ref = inv.invoice_number or f"INV-{inv.id}"
+        inv_date = inv.created_at.strftime("%d %b %Y") if inv.created_at else "-"
+        alloc_rows.append([
+            Paragraph("Direct Invoice Settlement", table_cell_style),
+            Paragraph(f"<b>{inv_ref}</b> (Bill Date: {inv_date})", table_cell_style),
+            Paragraph(formatted_date.split(',')[0], table_cell_style),
+            Paragraph(payment_amount_str, table_cell_right),
+        ])
+
+    # If unallocated advance credit remains
+    if unallocated_amount > Decimal('0.00'):
+        alloc_rows.append([
+            Paragraph("Customer Advance Credit", ParagraphStyle('Adv', parent=table_cell_style, fontName=_RECEIPT_FONT_BOLD, textColor=colors.HexColor("#2563EB"))),
+            Paragraph("Unallocated Balance (Held on Account)", ParagraphStyle('AdvDesc', parent=table_cell_style, textColor=colors.HexColor("#2563EB"))),
+            Paragraph("Available for future bills", table_cell_style),
+            Paragraph(f"{sym}{unallocated_amount:,.2f}", ParagraphStyle('AdvAmt', parent=table_cell_right, fontName=_RECEIPT_FONT_BOLD, textColor=colors.HexColor("#2563EB"))),
+        ])
+
+    # Summary Totals Row
+    alloc_rows.append([
+        Paragraph("<b>Total Received</b>", ParagraphStyle('Tot', parent=table_cell_style, fontName=_RECEIPT_FONT_BOLD)),
+        Paragraph("", table_cell_style),
+        Paragraph("", table_cell_style),
+        Paragraph(f"<b>{payment_amount_str}</b>", ParagraphStyle('TotR', parent=table_cell_right, fontName=_RECEIPT_FONT_BOLD, textColor=SUCCESS)),
+    ])
+
+    alloc_table = Table(alloc_rows, colWidths=[45 * mm, 65 * mm, 35 * mm, 35 * mm])
+    alloc_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), PRIMARY),
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('LEFTPADDING', (0, 0), (-1, -1), 8),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 8),
+        ('TOPPADDING', (0, 0), (-1, -1), 6),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ('LINEBELOW', (0, 0), (-1, -1), 0.5, BORDER_COLOR),
+        ('BACKGROUND', (0, -1), (-1, -1), NEUTRAL_LIGHT),
+        ('LINEABOVE', (0, -1), (-1, -1), 1.0, PRIMARY),
+        ('BOX', (0, 0), (-1, -1), 0.75, BORDER_COLOR),
+    ]))
+    story.append(alloc_table)
+    story.append(Spacer(1, 6 * mm))
+
+    # 4. Notes & Status Banner
+    notes_content = payment.notes or "Official electronic receipt acknowledging receipt of payment."
+    status_text = "Fully Allocated to Invoice(s)" if unallocated_amount == Decimal('0.00') else (
+        "Partially Allocated / Advance Balance Available" if total_allocated > Decimal('0.00') else "Customer Advance Payment (Unallocated Credit)"
+    )
+
+    notes_box = [
+        Paragraph("NOTES & REMARKS", meta_label_style),
+        Spacer(1, 1 * mm),
+        Paragraph(notes_content, notes_style),
+        Spacer(1, 2 * mm),
+        Paragraph(f"Allocation Status: <b>{status_text}</b>", ParagraphStyle('Stat', parent=notes_style, fontName=_RECEIPT_FONT_BOLD, textColor=PRIMARY)),
+    ]
+
+    status_box = [
+        Paragraph("RECEIPT VERIFICATION", meta_label_style),
+        Spacer(1, 1 * mm),
+        Paragraph("This receipt was digitally generated by Chai Flow.", notes_style),
+        Paragraph(f"Generated at: {payment.received_at.strftime('%Y-%m-%d %H:%M:%S')}", notes_style),
+        Paragraph("No physical signature is required.", notes_style),
+    ]
+
+    footer_table = Table([[notes_box, status_box]], colWidths=[100 * mm, 80 * mm])
+    footer_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, -1), NEUTRAL_LIGHT),
+        ('BOX', (0, 0), (-1, -1), 0.75, BORDER_COLOR),
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ('LEFTPADDING', (0, 0), (-1, -1), 10),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 10),
+        ('TOPPADDING', (0, 0), (-1, -1), 8),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+    ]))
+    story.append(KeepTogether([footer_table]))
+
+    doc.build(story, canvasmaker=NumberedCanvas)
+    return buffer.getvalue()
+
 
 

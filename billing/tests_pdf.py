@@ -167,3 +167,140 @@ class InvoicePDFTestCase(TestCase):
         self.assertEqual(response['Content-Type'], 'application/pdf')
         self.assertTrue(response.content.startswith(b'%PDF'))
 
+
+class PaymentReceiptPDFTestCase(TestCase):
+    def setUp(self):
+        self.owner = User.objects.create_user(
+            username='9876543211',
+            password='testpassword',
+            is_staff=True
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.owner)
+
+        self.customer = Customer.objects.create(
+            name="Sharma Chai Point",
+            phone="9876500001",
+            address="Shop 4, Market Complex"
+        )
+        self.invoice1 = Invoice.objects.create(
+            invoice_number="INV-20261120-0010",
+            customer=self.customer,
+            subtotal=Decimal("1500.00"),
+            grand_total=Decimal("1500.00")
+        )
+        self.invoice2 = Invoice.objects.create(
+            invoice_number="INV-20261120-0011",
+            customer=self.customer,
+            subtotal=Decimal("2000.00"),
+            grand_total=Decimal("2000.00")
+        )
+
+    def test_cash_payment_receipt_pdf(self):
+        payment = Payment.objects.create(
+            customer=self.customer,
+            amount=Decimal("1500.00"),
+            method="cash",
+            reference_number="CASH-001"
+        )
+        from billing.models import PaymentAllocation
+        PaymentAllocation.objects.create(
+            payment=payment,
+            invoice=self.invoice1,
+            allocated_amount=Decimal("1500.00")
+        )
+
+        response = self.client.get(f"/api/v1/billing/payments/{payment.id}/receipt/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response['Content-Type'], 'application/pdf')
+        self.assertTrue(response.content.startswith(b'%PDF'))
+        self.assertIn(f"ChaiFlow_Receipt_{payment.id}", response['Content-Disposition'])
+
+    def test_bank_transfer_payment_receipt_pdf(self):
+        payment = Payment.objects.create(
+            customer=self.customer,
+            amount=Decimal("2000.00"),
+            method="bank_transfer",
+            reference_number="NEFT99887766"
+        )
+        response = self.client.get(f"/api/v1/billing/payments/{payment.id}/receipt/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response['Content-Type'], 'application/pdf')
+        self.assertTrue(response.content.startswith(b'%PDF'))
+
+    def test_online_upi_payment_receipt_pdf(self):
+        payment = Payment.objects.create(
+            customer=self.customer,
+            amount=Decimal("800.00"),
+            method="upi",
+            reference_number="UPI-TXN-12345"
+        )
+        response = self.client.get(f"/api/v1/billing/payments/{payment.id}/receipt/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.content.startswith(b'%PDF'))
+
+    def test_partially_allocated_payment_receipt_pdf(self):
+        payment = Payment.objects.create(
+            customer=self.customer,
+            amount=Decimal("3000.00"),
+            method="online",
+            reference_number="TXN-PARTIAL-01"
+        )
+        from billing.models import PaymentAllocation
+        PaymentAllocation.objects.create(
+            payment=payment,
+            invoice=self.invoice1,
+            allocated_amount=Decimal("1500.00")
+        )
+        # 1500 allocated, 1500 remains as unallocated advance
+        self.assertEqual(payment.total_allocated, Decimal("1500.00"))
+        self.assertEqual(payment.unallocated_amount, Decimal("1500.00"))
+
+        response = self.client.get(f"/api/v1/billing/payments/{payment.id}/receipt/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.content.startswith(b'%PDF'))
+
+    def test_unallocated_advance_payment_receipt_pdf(self):
+        payment = Payment.objects.create(
+            customer=self.customer,
+            amount=Decimal("5000.00"),
+            method="cash",
+            reference_number="ADV-001"
+        )
+        self.assertEqual(payment.total_allocated, Decimal("0.00"))
+        self.assertEqual(payment.unallocated_amount, Decimal("5000.00"))
+
+        response = self.client.get(f"/api/v1/billing/payments/{payment.id}/receipt/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.content.startswith(b'%PDF'))
+
+    def test_unauthorized_access_rejected(self):
+        unauth_client = APIClient()
+        payment = Payment.objects.create(
+            customer=self.customer,
+            amount=Decimal("100.00"),
+            method="cash"
+        )
+        response = unauth_client.get(f"/api/v1/billing/payments/{payment.id}/receipt/")
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_non_owner_role_forbidden(self):
+        delivery_user = User.objects.create_user(
+            username='9876543212',
+            password='testpassword'
+        )
+        from accounts.models import UserProfile
+        UserProfile.objects.create(user=delivery_user, role='delivery')
+
+        del_client = APIClient()
+        del_client.force_authenticate(user=delivery_user)
+
+        payment = Payment.objects.create(
+            customer=self.customer,
+            amount=Decimal("100.00"),
+            method="cash"
+        )
+        response = del_client.get(f"/api/v1/billing/payments/{payment.id}/receipt/")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+
