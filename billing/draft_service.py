@@ -147,6 +147,12 @@ class DraftBillingService:
                         u_price = it.price
                         line_total = u_price * it.quantity
                         subtotal += line_total
+
+                        # Phase R1: Capture product cost snapshot if available
+                        prod_cost = getattr(it.product, 'cost_price', None) if it.product else None
+                        unit_cost_val = prod_cost if prod_cost is not None and prod_cost > Decimal('0.00') else (Decimal('0.00') if prod_cost is not None else None)
+                        total_cost_val = (unit_cost_val * it.quantity) if unit_cost_val is not None else None
+
                         DraftInvoiceItem.objects.create(
                             draft=draft,
                             product=it.product,
@@ -155,6 +161,8 @@ class DraftBillingService:
                             quantity=it.quantity,
                             unit_price=u_price,
                             total_price=line_total,
+                            unit_cost=unit_cost_val,
+                            total_cost=total_cost_val,
                         )
             else:
                 from products.models import Product
@@ -168,6 +176,20 @@ class DraftBillingService:
                     line_total = u_price * qty
                     subtotal += line_total
 
+                    # Phase R1: Allow explicit unit_cost or capture from Product.cost_price
+                    raw_cost = item.get('unit_cost')
+                    if raw_cost is not None:
+                        try:
+                            unit_cost_val = Decimal(str(raw_cost))
+                        except (ValueError, TypeError):
+                            unit_cost_val = None
+                    elif prod and getattr(prod, 'cost_price', None) is not None:
+                        unit_cost_val = prod.cost_price
+                    else:
+                        unit_cost_val = None
+
+                    total_cost_val = (unit_cost_val * qty) if unit_cost_val is not None else None
+
                     DraftInvoiceItem.objects.create(
                         draft=draft,
                         product=prod,
@@ -176,6 +198,8 @@ class DraftBillingService:
                         quantity=qty,
                         unit_price=u_price,
                         total_price=line_total,
+                        unit_cost=unit_cost_val,
+                        total_cost=total_cost_val,
                     )
 
             disc = Decimal(str(discount_amount or 0))
@@ -314,6 +338,20 @@ class DraftBillingService:
                     line_total = u_price * qty
                     subtotal += line_total
 
+                    # Phase R1: Capture / recalculate unit_cost & total_cost
+                    raw_cost = item.get('unit_cost')
+                    if raw_cost is not None:
+                        try:
+                            unit_cost_val = Decimal(str(raw_cost))
+                        except (ValueError, TypeError):
+                            unit_cost_val = None
+                    elif prod and getattr(prod, 'cost_price', None) is not None:
+                        unit_cost_val = prod.cost_price
+                    else:
+                        unit_cost_val = None
+
+                    total_cost_val = (unit_cost_val * qty) if unit_cost_val is not None else None
+
                     DraftInvoiceItem.objects.create(
                         draft=locked_draft,
                         product=prod,
@@ -322,6 +360,8 @@ class DraftBillingService:
                         quantity=qty,
                         unit_price=u_price,
                         total_price=line_total,
+                        unit_cost=unit_cost_val,
+                        total_cost=total_cost_val,
                     )
                 locked_draft.subtotal = subtotal
             else:
@@ -559,6 +599,13 @@ class DraftBillingService:
 
             # Create official InvoiceItems
             for d_item in draft_items:
+                # Phase R1: Lock historical unit_cost and total_cost snapshots
+                unit_cost_val = d_item.unit_cost
+                if unit_cost_val is None and d_item.product and getattr(d_item.product, 'cost_price', None) is not None:
+                    unit_cost_val = d_item.product.cost_price
+
+                total_cost_val = (unit_cost_val * d_item.quantity) if unit_cost_val is not None else None
+
                 InvoiceItem.objects.create(
                     invoice=official_invoice,
                     product=d_item.product,
@@ -566,6 +613,8 @@ class DraftBillingService:
                     unit_price=d_item.unit_price,
                     quantity=d_item.quantity,
                     total_price=d_item.total_price,
+                    unit_cost=unit_cost_val,
+                    total_cost=total_cost_val,
                 )
 
             # Create InvoiceOrder linking records

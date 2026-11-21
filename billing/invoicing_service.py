@@ -133,6 +133,10 @@ class InvoicingService:
                 if approved_override and approved_override.requested_price < base_unit_price:
                     total_discount += ((base_unit_price - approved_override.requested_price) * qty)
 
+                # Phase R1: Snapshot unit_cost & total_cost
+                unit_cost_val = getattr(product, 'cost_price', None) if product else None
+                total_cost_val = (unit_cost_val * qty) if unit_cost_val is not None else None
+
                 InvoiceItem.objects.create(
                     invoice=invoice,
                     product=product,
@@ -140,6 +144,8 @@ class InvoicingService:
                     unit_price=effective_unit_price,
                     quantity=qty,
                     total_price=line_total,
+                    unit_cost=unit_cost_val,
+                    total_cost=total_cost_val,
                 )
 
             grand_total = max(Decimal('0.00'), subtotal - total_discount)

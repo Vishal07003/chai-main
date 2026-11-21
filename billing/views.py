@@ -34,6 +34,7 @@ from .models import (
     DraftInvoice,
     DraftInvoiceItem,
     DraftInvoiceOrder,
+    Expense,
 )
 from .serializers import (
     CompanySerializer,
@@ -47,6 +48,7 @@ from .serializers import (
     DraftInvoiceCreateSerializer,
     DraftInvoiceUpdateSerializer,
     DraftFinalizeSerializer,
+    ExpenseSerializer,
 )
 from .pdf_generator import generate_invoice_pdf
 from .ledger_service import LedgerService
@@ -662,4 +664,45 @@ class DraftInvoiceViewSet(viewsets.ModelViewSet):
             'invoice': InvoiceDetailSerializer(official_invoice).data,
             'draft': DraftInvoiceDetailSerializer(draft).data,
         }, status=status.HTTP_201_CREATED)
+
+
+class ExpenseViewSet(viewsets.ModelViewSet):
+    """
+    Phase R1: Business Expense Management (Owner Only)
+    - Full CRUD for operating expenses (Rent, Utilities, Transport, etc.).
+    - Filtering by category, payment_method, date, month, year, search.
+    - Excludes raw material inventory purchases from operating expenses.
+    """
+    queryset = Expense.objects.select_related('recorded_by').all().order_by('-expense_date', '-created_at')
+    serializer_class = ExpenseSerializer
+    permission_classes = [permissions.IsAuthenticated, IsOwnerUser]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        category_param = self.request.query_params.get('category')
+        method_param = self.request.query_params.get('payment_method')
+        date_param = self.request.query_params.get('date')
+        from_date = self.request.query_params.get('from_date')
+        to_date = self.request.query_params.get('to_date')
+        search = self.request.query_params.get('search', '').strip()
+
+        if category_param:
+            queryset = queryset.filter(category=category_param)
+        if method_param:
+            queryset = queryset.filter(payment_method=method_param)
+        if date_param:
+            queryset = queryset.filter(expense_date=date_param)
+        if from_date:
+            queryset = queryset.filter(expense_date__gte=from_date)
+        if to_date:
+            queryset = queryset.filter(expense_date__lte=to_date)
+        if search:
+            queryset = queryset.filter(
+                Q(title__icontains=search) |
+                Q(notes__icontains=search)
+            )
+        return queryset
+
+    def perform_create(self, serializer):
+        serializer.save(recorded_by=self.request.user)
 

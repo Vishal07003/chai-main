@@ -5,7 +5,8 @@ from django.utils import timezone
 from .models import (
     Company, CompanyProductPrice, Customer, CustomerProductPrice,
     Invoice, InvoiceItem, Payment, PaymentAllocation, LedgerAdjustment,
-    InvoiceOrder, DraftInvoice, DraftInvoiceItem, DraftInvoiceOrder
+    InvoiceOrder, DraftInvoice, DraftInvoiceItem, DraftInvoiceOrder,
+    Expense
 )
 from products.models import Product
 
@@ -170,10 +171,15 @@ class PaymentSerializer(serializers.ModelSerializer):
 
 
 class InvoiceItemSerializer(serializers.ModelSerializer):
+    has_cost_snapshot = serializers.BooleanField(read_only=True)
+
     class Meta:
         model = InvoiceItem
-        fields = ['id', 'product', 'product_name', 'unit_price', 'quantity', 'total_price']
-        read_only_fields = ['id', 'total_price']
+        fields = [
+            'id', 'product', 'product_name', 'unit_price', 'quantity', 'total_price',
+            'unit_cost', 'total_cost', 'has_cost_snapshot'
+        ]
+        read_only_fields = ['id', 'total_price', 'unit_cost', 'total_cost', 'has_cost_snapshot']
 
 
 class InvoiceDetailSerializer(serializers.ModelSerializer):
@@ -318,6 +324,11 @@ class InvoiceCreateSerializer(serializers.Serializer):
                 item_total = u_price * qty
                 subtotal += item_total
 
+                # Phase R1: Snapshot unit_cost & total_cost
+                prod_obj = products_map.get(pid) if pid else None
+                unit_cost_val = getattr(prod_obj, 'cost_price', None) if prod_obj else None
+                total_cost_val = (unit_cost_val * qty) if unit_cost_val is not None else None
+
                 InvoiceItem.objects.create(
                     invoice=invoice,
                     product_id=pid if pid in products_map else None,
@@ -325,6 +336,8 @@ class InvoiceCreateSerializer(serializers.Serializer):
                     unit_price=u_price,
                     quantity=qty,
                     total_price=item_total,
+                    unit_cost=unit_cost_val,
+                    total_cost=total_cost_val,
                 )
 
             if discount_amount > subtotal:
@@ -382,9 +395,10 @@ class DraftInvoiceItemSerializer(serializers.ModelSerializer):
     class Meta:
         model = DraftInvoiceItem
         fields = [
-            'id', 'product', 'product_name', 'unit', 'quantity', 'unit_price', 'total_price'
+            'id', 'product', 'product_name', 'unit', 'quantity', 'unit_price', 'total_price',
+            'unit_cost', 'total_cost'
         ]
-        read_only_fields = ['id', 'total_price']
+        read_only_fields = ['id', 'total_price', 'unit_cost', 'total_cost']
 
 
 class DraftInvoiceOrderSerializer(serializers.ModelSerializer):
@@ -529,4 +543,30 @@ class DraftInvoiceUpdateSerializer(serializers.Serializer):
 
 class DraftFinalizeSerializer(serializers.Serializer):
     notes = serializers.CharField(required=False, allow_blank=True)
+
+
+class ExpenseSerializer(serializers.ModelSerializer):
+    recorded_by_name = serializers.CharField(source='recorded_by.username', read_only=True)
+    category_display = serializers.CharField(source='get_category_display', read_only=True)
+    payment_method_display = serializers.CharField(source='get_payment_method_display', read_only=True)
+
+    class Meta:
+        model = Expense
+        fields = [
+            'id', 'title', 'category', 'category_display', 'amount',
+            'expense_date', 'payment_method', 'payment_method_display',
+            'notes', 'recorded_by', 'recorded_by_name',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'recorded_by', 'recorded_by_name', 'created_at', 'updated_at']
+
+    def validate_title(self, value):
+        if not value or not value.strip():
+            raise serializers.ValidationError("Expense title is required.")
+        return value.strip()
+
+    def validate_amount(self, value):
+        if value is None or value <= Decimal('0.00'):
+            raise serializers.ValidationError("Expense amount must be greater than zero.")
+        return value
 

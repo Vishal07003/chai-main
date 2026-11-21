@@ -166,9 +166,28 @@ class InvoiceItem(models.Model):
     unit_price = models.DecimalField(max_digits=10, decimal_places=2)
     quantity = models.PositiveIntegerField(default=1)
     total_price = models.DecimalField(max_digits=10, decimal_places=2)
+    # Phase R1: Historical unit cost and total cost snapshots
+    unit_cost = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Historical cost price snapshot at invoice finalization. Null indicates historical cost unavailable."
+    )
+    total_cost = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Historical total cost snapshot (unit_cost * quantity). Null indicates historical cost unavailable."
+    )
 
     def __str__(self):
         return f"{self.quantity}x {self.product_name} in {self.invoice.invoice_number}"
+
+    @property
+    def has_cost_snapshot(self) -> bool:
+        return self.unit_cost is not None
 
 
 class Payment(models.Model):
@@ -386,6 +405,21 @@ class DraftInvoiceItem(models.Model):
     quantity = models.PositiveIntegerField(default=1)
     unit_price = models.DecimalField(max_digits=10, decimal_places=2)
     total_price = models.DecimalField(max_digits=10, decimal_places=2)
+    # Phase R1: Cost snapshot in draft
+    unit_cost = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Product cost price snapshot at draft creation/update time."
+    )
+    total_cost = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Total cost snapshot (unit_cost * quantity)."
+    )
 
     def __str__(self):
         return f"{self.quantity}x {self.product_name} in {self.draft.draft_number}"
@@ -415,4 +449,51 @@ class DraftInvoiceOrder(models.Model):
 
     def __str__(self):
         return f"Order #{self.order_id} reserved in {self.draft.draft_number}"
+
+
+class Expense(models.Model):
+    """
+    Phase R1: Business Operating Expense Entity.
+    - Owner-only access.
+    - Tracks business operational costs (Rent, Electricity, Utilities, Transport, etc.).
+    - Strictly distinct from raw material inventory / COGS.
+    """
+    CATEGORY_CHOICES = (
+        ('rent', 'Rent'),
+        ('electricity_utilities', 'Electricity & Utilities'),
+        ('transport', 'Transport & Fuel'),
+        ('packaging', 'Packaging Materials'),
+        ('maintenance', 'Maintenance & Repairs'),
+        ('administrative', 'Administrative & Office'),
+        ('salaries', 'Staff & Partner Wages'),
+        ('marketing', 'Marketing & Promotion'),
+        ('other_operating', 'Other Operating Expenses'),
+    )
+
+    PAYMENT_METHOD_CHOICES = (
+        ('cash', 'Cash'),
+        ('online', 'Online'),
+        ('upi', 'UPI / QR'),
+        ('bank_transfer', 'Bank Transfer (NEFT/RTGS)'),
+        ('cheque', 'Cheque'),
+    )
+
+    title = models.CharField(max_length=200, db_index=True)
+    category = models.CharField(max_length=40, choices=CATEGORY_CHOICES, default='other_operating', db_index=True)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    expense_date = models.DateField(default=timezone.now, db_index=True)
+    payment_method = models.CharField(max_length=20, choices=PAYMENT_METHOD_CHOICES, default='cash')
+    notes = models.TextField(blank=True, default='')
+    recorded_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='recorded_expenses')
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-expense_date', '-created_at']
+        indexes = [
+            models.Index(fields=['expense_date', 'category']),
+        ]
+
+    def __str__(self):
+        return f"{self.title} (₹{self.amount}) [{self.get_category_display()}] on {self.expense_date}"
 
