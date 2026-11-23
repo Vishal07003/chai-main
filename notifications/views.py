@@ -32,14 +32,16 @@ class DeviceTokenViewSet(viewsets.ModelViewSet):
         return Response({'error': 'Token required'}, status=status.HTTP_400_BAD_REQUEST)
 
 
-class NotificationLogViewSet(viewsets.ReadOnlyModelViewSet):
+class NotificationLogViewSet(viewsets.ModelViewSet):
     """
     Role-based Notification History & Delivery Status.
     Owner sees owner notifications and system logs.
     Delivery Partner sees delivery assignments and alerts.
+    Supports authenticated deletion (swipe-to-delete) scoped strictly to user's permissions.
     """
     serializer_class = NotificationLogSerializer
     permission_classes = [permissions.IsAuthenticated]
+    http_method_names = ['get', 'post', 'delete', 'head', 'options']
 
     def get_queryset(self):
         user = self.request.user
@@ -57,6 +59,10 @@ class NotificationLogViewSet(viewsets.ReadOnlyModelViewSet):
             )
         else:
             return NotificationLog.objects.filter(recipient=user)
+
+    def perform_destroy(self, instance):
+        # Scoped strictly: user can only delete records that match their queryset
+        instance.delete()
 
     @action(detail=True, methods=['post'])
     def mark_read(self, request, pk=None):

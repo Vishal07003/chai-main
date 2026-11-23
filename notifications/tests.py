@@ -135,3 +135,33 @@ class NotificationTests(TestCase):
         failed_log.refresh_from_db()
         self.assertEqual(failed_log.retry_count, 1)
         self.assertEqual(failed_log.status, 'sent')
+
+    def test_authenticated_user_can_delete_own_notification(self):
+        """User can delete their own notification record via DELETE /api/v1/notifications/history/{id}/."""
+        log = NotificationLog.objects.create(
+            recipient=self.driver,
+            target_role='delivery',
+            channel='fcm',
+            title='Driver Notification',
+            body='Trip assigned'
+        )
+        self.client.force_authenticate(user=self.driver)
+        res = self.client.delete(f'/api/v1/notifications/history/{log.id}/')
+        self.assertEqual(res.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(NotificationLog.objects.filter(id=log.id).exists())
+
+    def test_user_cannot_delete_other_user_notification(self):
+        """User cannot delete another user's private notification."""
+        owner_log = NotificationLog.objects.create(
+            recipient=self.owner,
+            target_role='owner',
+            channel='fcm',
+            title='Owner Secret',
+            body='Confidential owner alert'
+        )
+        self.client.force_authenticate(user=self.driver)
+        res = self.client.delete(f'/api/v1/notifications/history/{owner_log.id}/')
+        # Filtered queryset means 404 Not Found for other users
+        self.assertEqual(res.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertTrue(NotificationLog.objects.filter(id=owner_log.id).exists())
+
