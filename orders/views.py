@@ -60,12 +60,16 @@ class OrderViewSet(viewsets.ModelViewSet):
             status_param = self.request.query_params.get('status')
             company_id = self.request.query_params.get('company')
             customer_id = self.request.query_params.get('customer')
+            unbilled_param = self.request.query_params.get('unbilled')
             if status_param:
                 queryset = queryset.filter(status=status_param)
             if company_id:
                 queryset = queryset.filter(company_id=company_id)
             if customer_id:
                 queryset = queryset.filter(Q(customer_profile_id=customer_id) | Q(customer_id=customer_id))
+            if unbilled_param in ('true', '1', 'True'):
+                # Filter for orders that have NO invoice and NO order_billing
+                queryset = queryset.filter(invoice__isnull=True, order_billing__isnull=True)
             return queryset
 
         if hasattr(user, 'profile') and user.profile.role == 'delivery':
@@ -237,7 +241,9 @@ class OrderViewSet(viewsets.ModelViewSet):
             order=order,
             confirmed_items=items_payload,
             owner_user=user,
-            notes=notes
+            notes=notes,
+            discount_amount=request.data.get('discount_amount'),
+            due_date=request.data.get('due_date'),
         )
 
         return Response(InvoiceDetailSerializer(invoice).data, status=status.HTTP_201_CREATED)

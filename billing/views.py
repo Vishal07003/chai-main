@@ -3,6 +3,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.renderers import BaseRenderer
 from rest_framework.exceptions import ValidationError, PermissionDenied
+from django.db import models, transaction
 from django.db.models import Q, Sum, Count
 from django.utils import timezone
 from decimal import Decimal
@@ -35,6 +36,7 @@ from .models import (
     DraftInvoiceItem,
     DraftInvoiceOrder,
     Expense,
+    InvoiceAuditLog,
 )
 from .serializers import (
     CompanySerializer,
@@ -376,7 +378,7 @@ class InvoiceViewSet(viewsets.ModelViewSet):
     - Filter invoices by date, company, customer, payment status
     - Dashboard metrics aggregation
     """
-    queryset = Invoice.objects.select_related('customer', 'company', 'order').prefetch_related('items', 'payments', 'allocations').all().order_by('-created_at')
+    queryset = Invoice.objects.select_related('customer', 'company', 'order').prefetch_related('items', 'payments', 'allocations', 'audit_logs').all().order_by('-created_at')
     permission_classes = [permissions.IsAuthenticated]
 
     def get_serializer_class(self):
@@ -415,6 +417,149 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         invoice = serializer.save()
         return Response(InvoiceDetailSerializer(invoice).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['patch', 'put'])
+    def edit_bill(self, request, pk=None):
+        """
+        Part 4: Owner edit saved bill with audit history and ledger synchronization.
+        Editable fields:
+        - items: [{'product_id': int, 'product_name': str, 'unit_price': str/num, 'quantity': int}]
+        - discount_amount: Decimal
+        - notes: str
+        - due_date: date
+        - reason: audit explanation
+        """
+        user = request.user
+        if not (user.is_staff or user.is_superuser or (hasattr(user, 'profile') and user.profile.role == 'owner')):
+            raise PermissionDenied("Only owners can edit saved bills.")
+
+        invoice = self.get_object()
+        data = request.data
+
+        with transaction.atomic():
+            locked_invoice = Invoice.objects.select_for_update().get(id=invoice.id)
+
+            # 1. Snapshot previous state
+            previous_items_snap = [
+                {
+                    'id': it.id,
+                    'product_id': it.product_id,
+                    'product_name': it.product_name,
+                    'unit_price': str(it.unit_price),
+                    'quantity': it.quantity,
+                    'total_price': str(it.total_price),
+                }
+                for it in locked_invoice.items.all()
+            ]
+            prev_subtotal = locked_invoice.subtotal
+            prev_discount = locked_invoice.discount_amount
+            prev_grand_total = locked_invoice.grand_total
+            prev_notes = locked_invoice.notes
+
+            # 2. Update items if provided
+            items_payload = data.get('items')
+            if items_payload is not None:
+                if not isinstance(items_payload, list) or len(items_payload) == 0:
+                    raise ValidationError({'items': 'A bill must have at least one product line.'})
+
+                locked_invoice.items.all().delete()
+                subtotal = Decimal('0.00')
+
+                from products.models import Product
+                p_ids = [it.get('product_id') for it in items_payload if it.get('product_id')]
+                prod_map = {p.id: p for p in Product.objects.filter(id__in=p_ids)}
+
+                for it in items_payload:
+                    pid = it.get('product_id')
+                    p_obj = prod_map.get(pid) if pid else None
+                    p_name = it.get('product_name') or (p_obj.name if p_obj else 'Item')
+                    qty = int(it.get('quantity', 1))
+                    if qty <= 0:
+                        raise ValidationError({'items': 'Product quantities must be positive.'})
+
+                    if 'unit_price' in it:
+                        u_price = Decimal(str(it['unit_price']))
+                    elif p_obj:
+                        u_price = p_obj.price
+                    else:
+                        u_price = Decimal('0.00')
+
+                    line_total = u_price * qty
+                    subtotal += line_total
+
+                    unit_cost_val = getattr(p_obj, 'cost_price', None) if p_obj else None
+                    total_cost_val = (unit_cost_val * qty) if unit_cost_val is not None else None
+
+                    InvoiceItem.objects.create(
+                        invoice=locked_invoice,
+                        product=p_obj,
+                        product_name=p_name,
+                        unit_price=u_price,
+                        quantity=qty,
+                        total_price=line_total,
+                        unit_cost=unit_cost_val,
+                        total_cost=total_cost_val,
+                    )
+                locked_invoice.subtotal = subtotal
+            else:
+                subtotal = locked_invoice.subtotal
+
+            # 3. Update discount
+            if 'discount_amount' in data:
+                disc_val = Decimal(str(data['discount_amount']))
+                if disc_val < Decimal('0.00'):
+                    raise ValidationError({'discount_amount': 'Discount amount cannot be negative.'})
+                locked_invoice.discount_amount = disc_val
+
+            # 4. Update notes & due_date
+            if 'notes' in data:
+                locked_invoice.notes = data['notes']
+            if 'due_date' in data:
+                locked_invoice.due_date = data['due_date']
+
+            # 5. Compute new grand total & update payment status
+            new_grand_total = max(Decimal('0.00'), locked_invoice.subtotal - locked_invoice.discount_amount)
+            locked_invoice.grand_total = new_grand_total
+            locked_invoice.save()
+            locked_invoice.update_payment_status()
+
+            # 6. Record Audit Log
+            updated_items_snap = [
+                {
+                    'id': it.id,
+                    'product_id': it.product_id,
+                    'product_name': it.product_name,
+                    'unit_price': str(it.unit_price),
+                    'quantity': it.quantity,
+                    'total_price': str(it.total_price),
+                }
+                for it in locked_invoice.items.all()
+            ]
+
+            InvoiceAuditLog.objects.create(
+                invoice=locked_invoice,
+                edited_by=user,
+                previous_total=prev_grand_total,
+                updated_total=new_grand_total,
+                previous_values={
+                    'subtotal': str(prev_subtotal),
+                    'discount_amount': str(prev_discount),
+                    'grand_total': str(prev_grand_total),
+                    'notes': prev_notes,
+                    'items': previous_items_snap,
+                },
+                updated_values={
+                    'subtotal': str(locked_invoice.subtotal),
+                    'discount_amount': str(locked_invoice.discount_amount),
+                    'grand_total': str(locked_invoice.grand_total),
+                    'notes': locked_invoice.notes,
+                    'items': updated_items_snap,
+                },
+                reason=data.get('reason', 'Bill edited by Owner'),
+            )
+
+        fresh_inv = self.get_queryset().get(id=invoice.id)
+        return Response(InvoiceDetailSerializer(fresh_inv).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'])
     def payments(self, request, pk=None):

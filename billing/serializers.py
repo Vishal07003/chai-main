@@ -6,7 +6,7 @@ from .models import (
     Company, CompanyProductPrice, Customer, CustomerProductPrice,
     Invoice, InvoiceItem, Payment, PaymentAllocation, LedgerAdjustment,
     InvoiceOrder, DraftInvoice, DraftInvoiceItem, DraftInvoiceOrder,
-    Expense
+    Expense, InvoiceAuditLog
 )
 from products.models import Product
 
@@ -182,10 +182,25 @@ class InvoiceItemSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'total_price', 'unit_cost', 'total_cost', 'has_cost_snapshot']
 
 
+class InvoiceAuditLogSerializer(serializers.ModelSerializer):
+    edited_by_name = serializers.CharField(source='edited_by.username', read_only=True)
+
+    class Meta:
+        model = InvoiceAuditLog
+        fields = [
+            'id', 'invoice', 'edited_by', 'edited_by_name',
+            'previous_total', 'updated_total',
+            'previous_values', 'updated_values',
+            'reason', 'created_at'
+        ]
+        read_only_fields = ['id', 'invoice', 'edited_by', 'edited_by_name', 'created_at']
+
+
 class InvoiceDetailSerializer(serializers.ModelSerializer):
     items = InvoiceItemSerializer(many=True, read_only=True)
     payments = PaymentSerializer(many=True, read_only=True)
     allocations = PaymentAllocationSerializer(many=True, read_only=True)
+    audit_logs = InvoiceAuditLogSerializer(many=True, read_only=True)
     total_paid = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
     pending_amount = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
     company_name = serializers.CharField(source='company.name', read_only=True)
@@ -197,11 +212,11 @@ class InvoiceDetailSerializer(serializers.ModelSerializer):
             'id', 'invoice_number', 'order', 'company', 'company_name',
             'customer', 'customer_name', 'customer_phone',
             'subtotal', 'discount_amount', 'grand_total', 'status', 'due_date', 'finalized_at', 'notes', 'created_at',
-            'items', 'payments', 'allocations', 'total_paid', 'pending_amount', 'is_overdue'
+            'items', 'payments', 'allocations', 'audit_logs', 'total_paid', 'pending_amount', 'is_overdue'
         ]
         read_only_fields = [
             'id', 'invoice_number', 'order', 'created_at', 'status', 'finalized_at',
-            'total_paid', 'pending_amount', 'company_name', 'is_overdue'
+            'total_paid', 'pending_amount', 'company_name', 'is_overdue', 'audit_logs'
         ]
 
     def get_is_overdue(self, obj):

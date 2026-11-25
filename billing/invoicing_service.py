@@ -54,13 +54,13 @@ class InvoicingService:
         return product.price
 
     @classmethod
-    def generate_manual_invoice(cls, order: Order, confirmed_items: list, owner_user, notes: str = '') -> Invoice:
+    def generate_manual_invoice(cls, order: Order, confirmed_items: list, owner_user, notes: str = '', discount_amount: Decimal = None, due_date = None) -> Invoice:
         """
         Generates official Invoice from an Order under an atomic transaction:
-        - confirmed_items: list of dicts: [{'product_id': int, 'quantity': int}]
+        - confirmed_items: list of dicts: [{'product_id': int, 'quantity': int, 'unit_price': optional Decimal, 'product_name': optional str}]
         - Validates owner permission.
         - Validates that order does not already have an invoice.
-        - Recalculates all pricing on the backend.
+        - Recalculates all pricing on the backend or respects owner-reviewed rates.
         """
         if not owner_user.is_staff and not owner_user.is_superuser:
             if not (hasattr(owner_user, 'profile') and owner_user.profile.role == 'owner'):
@@ -98,6 +98,8 @@ class InvoicingService:
                 customer_name=customer_name,
                 customer_phone=customer_phone,
                 status='unpaid',
+                due_date=due_date,
+                finalized_at=timezone.now(),
                 notes=notes,
                 generated_by=owner_user,
             )
@@ -114,33 +116,39 @@ class InvoicingService:
                     continue
 
                 from products.models import Product
-                product = Product.objects.get(id=product_id)
+                product = Product.objects.filter(id=product_id).first() if product_id else None
+                p_name = item_data.get('product_name') or (product.name if product else 'Item')
 
-                # 1. Base rate resolution (backend only)
-                base_unit_price = cls.resolve_item_unit_price(pricing_entity, product, qty)
+                # Base rate resolution
+                if 'unit_price' in item_data and item_data['unit_price'] is not None:
+                    effective_unit_price = Decimal(str(item_data['unit_price']))
+                    base_unit_price = effective_unit_price
+                elif product:
+                    base_unit_price = cls.resolve_item_unit_price(pricing_entity, product, qty)
+                    # Check for Owner-Approved Price Override for this item
+                    approved_override = PriceOverrideRequest.objects.filter(
+                        order=locked_order,
+                        product=product,
+                        status='APPROVED',
+                    ).order_by('-decision_timestamp').first()
 
-                # 2. Check for Owner-Approved Price Override for this item
-                approved_override = PriceOverrideRequest.objects.filter(
-                    order=locked_order,
-                    product=product,
-                    status='APPROVED',
-                ).order_by('-decision_timestamp').first()
+                    effective_unit_price = approved_override.requested_price if approved_override else base_unit_price
+                    if approved_override and approved_override.requested_price < base_unit_price:
+                        total_discount += ((base_unit_price - approved_override.requested_price) * qty)
+                else:
+                    base_unit_price = Decimal('0.00')
+                    effective_unit_price = Decimal('0.00')
 
-                effective_unit_price = approved_override.requested_price if approved_override else base_unit_price
                 line_total = effective_unit_price * qty
-                subtotal += (base_unit_price * qty)
+                subtotal += (effective_unit_price * qty)
 
-                if approved_override and approved_override.requested_price < base_unit_price:
-                    total_discount += ((base_unit_price - approved_override.requested_price) * qty)
-
-                # Phase R1: Snapshot unit_cost & total_cost
                 unit_cost_val = getattr(product, 'cost_price', None) if product else None
                 total_cost_val = (unit_cost_val * qty) if unit_cost_val is not None else None
 
                 InvoiceItem.objects.create(
                     invoice=invoice,
                     product=product,
-                    product_name=product.name,
+                    product_name=p_name,
                     unit_price=effective_unit_price,
                     quantity=qty,
                     total_price=line_total,
@@ -148,10 +156,15 @@ class InvoicingService:
                     total_cost=total_cost_val,
                 )
 
-            grand_total = max(Decimal('0.00'), subtotal - total_discount)
+            if discount_amount is not None:
+                final_discount = Decimal(str(discount_amount))
+            else:
+                final_discount = total_discount
+
+            grand_total = max(Decimal('0.00'), subtotal - final_discount)
             invoice.subtotal = subtotal
-            invoice.discount_amount = total_discount
+            invoice.discount_amount = final_discount
             invoice.grand_total = grand_total
-            invoice.save(update_fields=['subtotal', 'discount_amount', 'grand_total'])
+            invoice.save(update_fields=['subtotal', 'discount_amount', 'grand_total', 'due_date', 'finalized_at'])
 
             return invoice

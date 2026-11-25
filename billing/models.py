@@ -497,3 +497,32 @@ class Expense(models.Model):
     def __str__(self):
         return f"{self.title} (₹{self.amount}) [{self.get_category_display()}] on {self.expense_date}"
 
+
+class InvoiceAuditLog(models.Model):
+    """
+    Part 4: Audit trail for Owner edits to finalized/saved bills.
+    For every edit, captures:
+    - Bill ID
+    - Previous values (items snapshot, previous subtotal, discount, grand total)
+    - Updated values (items snapshot, updated subtotal, discount, grand total)
+    - Edited by User
+    - Edit timestamp
+    - Previous and updated grand totals
+    - Edit notes / reason
+    """
+    invoice = models.ForeignKey(Invoice, on_delete=models.CASCADE, related_name='audit_logs')
+    edited_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name='invoice_audits')
+    previous_total = models.DecimalField(max_digits=10, decimal_places=2)
+    updated_total = models.DecimalField(max_digits=10, decimal_places=2)
+    previous_values = models.JSONField(help_text="Snapshot of previous items, subtotal, discount, and notes")
+    updated_values = models.JSONField(help_text="Snapshot of updated items, subtotal, discount, and notes")
+    reason = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Audit for Invoice #{self.invoice_id} at {self.created_at} by {self.edited_by.username} (₹{self.previous_total} -> ₹{self.updated_total})"
+
+
