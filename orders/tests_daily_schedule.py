@@ -3,6 +3,8 @@ from decimal import Decimal
 import zoneinfo
 
 from django.test import TestCase
+from rest_framework.test import APIClient
+from rest_framework import status
 from django.contrib.auth.models import User
 from django.utils import timezone
 
@@ -250,3 +252,127 @@ class DailyDeliveryScheduleTests(TestCase):
         tracker.refresh_from_db()
         self.assertIsNotNone(tracker.partner_accepted_at)
         self.assertIsNone(tracker.reminder_notified_at)
+
+    def test_api_create_schedule_success(self):
+        """Verify POST /api/orders/schedules/ creates schedule with items and correct rates."""
+        client = APIClient()
+        client.force_authenticate(user=self.owner_user)
+
+        today = timezone.now().astimezone(KOLKATA_TZ).date()
+        payload = {
+            'customer_id': self.customer1.id,
+            'delivery_partner_id': self.partner1.id,
+            'delivery_time': '10:30:00',
+            'notification_lead_time_minutes': 30,
+            'weekdays': '0,1,2,3,4',
+            'delivery_address': 'Floor 3, Tech Park',
+            'start_date': str(today),
+            'is_active': True,
+            'notes': 'Call on arrival',
+            'items': [
+                {
+                    'product_id': self.chai.id,
+                    'quantity': 5,
+                    'unit_price': '18.50'
+                },
+                {
+                    'product_id': self.bun.id,
+                    'quantity': 2,
+                    'unit_price': '38.00'
+                }
+            ]
+        }
+
+        response = client.post('/api/v1/orders/schedules/', payload, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertIn('id', response.data)
+
+        # Verify DB records
+        created_sched = DailyDeliverySchedule.objects.get(id=response.data['id'])
+        self.assertEqual(created_sched.customer_profile, self.customer1)
+        self.assertEqual(created_sched.delivery_partner, self.partner1)
+        self.assertEqual(created_sched.items.count(), 2)
+
+        chai_item = created_sched.items.get(product=self.chai)
+        self.assertEqual(chai_item.quantity, 5)
+        self.assertEqual(chai_item.unit_price, Decimal('18.50'))
+
+    def test_api_create_schedule_invalid_customer_returns_400(self):
+        """Invalid customer_id must return HTTP 400 Bad Request, not HTTP 500 error."""
+        client = APIClient()
+        client.force_authenticate(user=self.owner_user)
+
+        today = timezone.now().astimezone(KOLKATA_TZ).date()
+        payload = {
+            'customer_id': 999999,  # Non-existent customer
+            'delivery_partner_id': self.partner1.id,
+            'delivery_time': '10:30:00',
+            'weekdays': '0,1,2,3,4',
+            'start_date': str(today),
+            'items': [
+                {'product_id': self.chai.id, 'quantity': 1}
+            ]
+        }
+
+        response = client.post('/api/v1/orders/schedules/', payload, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('customer_id', response.data)
+        self.assertEqual(response.data['customer_id'][0], 'Customer profile does not exist.')
+
+    def test_api_create_schedule_invalid_partner_returns_400(self):
+        """Invalid delivery_partner_id must return HTTP 400 Bad Request."""
+        client = APIClient()
+        client.force_authenticate(user=self.owner_user)
+
+        today = timezone.now().astimezone(KOLKATA_TZ).date()
+        payload = {
+            'customer_id': self.customer1.id,
+            'delivery_partner_id': 999999,  # Non-existent partner
+            'delivery_time': '10:30:00',
+            'weekdays': '0,1,2,3,4',
+            'start_date': str(today),
+            'items': [
+                {'product_id': self.chai.id, 'quantity': 1}
+            ]
+        }
+
+        response = client.post('/api/v1/orders/schedules/', payload, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('delivery_partner_id', response.data)
+        self.assertEqual(response.data['delivery_partner_id'][0], 'Delivery partner does not exist.')
+
+    def test_api_update_schedule_success(self):
+        """Verify PATCH /api/v1/orders/schedules/{id}/ updates customer, partner and items."""
+        client = APIClient()
+        client.force_authenticate(user=self.owner_user)
+
+        today = timezone.now().astimezone(KOLKATA_TZ).date()
+        sched = DailyDeliverySchedule.objects.create(
+            customer_profile=self.customer1,
+            customer_user=self.cust_user1,
+            delivery_partner=self.partner1,
+            delivery_time=time(10, 0),
+            weekdays='0,1,2',
+            start_date=today,
+            is_active=True
+        )
+        DailyDeliveryScheduleItem.objects.create(schedule=sched, product=self.chai, quantity=1, unit_price=Decimal('20.00'))
+
+        update_payload = {
+            'customer_id': self.customer2.id,
+            'delivery_partner_id': self.partner2.id,
+            'delivery_time': '14:00:00',
+            'items': [
+                {'product_id': self.bun.id, 'quantity': 3, 'unit_price': '35.00'}
+            ]
+        }
+
+        response = client.patch(f'/api/v1/orders/schedules/{sched.id}/', update_payload, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        sched.refresh_from_db()
+        self.assertEqual(sched.customer_profile, self.customer2)
+        self.assertEqual(sched.delivery_partner, self.partner2)
+        self.assertEqual(sched.delivery_time, time(14, 0))
+        self.assertEqual(sched.items.count(), 1)
+        self.assertEqual(sched.items.first().product, self.bun)
+        self.assertEqual(sched.items.first().quantity, 3)

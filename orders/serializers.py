@@ -41,9 +41,18 @@ class OrderSerializer(serializers.ModelSerializer):
             'status', 'total_amount', 'delivery_address', 'notes',
             'scheduled_delivery_date', 'scheduled_delivery_time',
             'delivery_partner_id', 'delivery_partner_name', 'delivery_status',
-            'has_invoice', 'invoice_number', 'created_at', 'updated_at', 'items'
+            'has_invoice', 'invoice_number', 'order_type', 'created_at', 'updated_at', 'items'
         ]
-        read_only_fields = ['id', 'customer', 'customer_name', 'customer_phone', 'delivery_partner_id', 'delivery_partner_name', 'delivery_status', 'total_amount', 'has_invoice', 'invoice_number', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'customer', 'customer_name', 'customer_phone', 'delivery_partner_id', 'delivery_partner_name', 'delivery_status', 'total_amount', 'has_invoice', 'invoice_number', 'order_type', 'created_at', 'updated_at']
+
+    order_type = serializers.SerializerMethodField()
+
+    def get_order_type(self, obj):
+        if hasattr(obj, 'daily_schedule_execution') and obj.daily_schedule_execution is not None:
+            return 'Scheduled'
+        if hasattr(obj, 'recurring_execution') and obj.recurring_execution is not None:
+            return 'Scheduled'
+        return 'One-Time'
 
     def get_customer_name(self, obj):
         if obj.customer_profile:
@@ -89,11 +98,17 @@ class OrderCreateSerializer(serializers.ModelSerializer):
     customer_id = serializers.IntegerField(required=False, allow_null=True)
     company_id = serializers.IntegerField(required=False, allow_null=True)
     delivery_partner_id = serializers.IntegerField(required=False, allow_null=True)
+    scheduled_delivery_date = serializers.DateField(required=False, allow_null=True)
+    scheduled_delivery_time = serializers.TimeField(required=False, allow_null=True)
     items = OrderItemWriteSerializer(many=True, write_only=True)
 
     class Meta:
         model = Order
-        fields = ['id', 'customer_id', 'company_id', 'delivery_partner_id', 'delivery_address', 'notes', 'items']
+        fields = [
+            'id', 'customer_id', 'company_id', 'delivery_partner_id',
+            'delivery_address', 'notes', 'scheduled_delivery_date',
+            'scheduled_delivery_time', 'items'
+        ]
 
     def validate_items(self, value):
         if not value:
@@ -211,7 +226,27 @@ class OrderCreateSerializer(serializers.ModelSerializer):
             from notifications.services import NotificationService
             NotificationService.on_order_created(order)
             if driver_user:
-                NotificationService.on_delivery_assigned(delivery)
+                # Notification rules for one-time / direct order:
+                # - Immediate delivery (no future delivery date/time specified, or scheduled for today within 30 min):
+                #   notify assigned partner immediately.
+                # - Future delivery (scheduled delivery date > today or delivery time > now + 30 mins):
+                #   will be dispatched 30 mins prior to delivery time by the automated notification engine or on-demand.
+                import zoneinfo
+                from datetime import datetime, timedelta
+                kolkata_tz = zoneinfo.ZoneInfo('Asia/Kolkata')
+                now_dt = timezone.now().astimezone(kolkata_tz)
+                today = now_dt.date()
+
+                is_immediate = True
+                if order.scheduled_delivery_date and order.scheduled_delivery_date > today:
+                    is_immediate = False
+                elif order.scheduled_delivery_date == today and order.scheduled_delivery_time:
+                    target_dt = datetime.combine(today, order.scheduled_delivery_time, tzinfo=kolkata_tz)
+                    if target_dt > now_dt + timedelta(minutes=30):
+                        is_immediate = False
+
+                if is_immediate:
+                    NotificationService.on_delivery_assigned(delivery)
 
         return order
 
@@ -637,7 +672,7 @@ class DailyDeliveryScheduleWriteSerializer(serializers.ModelSerializer):
         customer_id = attrs.get('customer_id')
         if customer_id:
             try:
-                cust = Customer.objects.select_related('user').get(id=customer_id)
+                cust = Customer.objects.select_related('company').get(id=customer_id)
                 self.context['validated_customer'] = cust
             except Customer.DoesNotExist:
                 raise serializers.ValidationError({'customer_id': 'Customer profile does not exist.'})
@@ -664,12 +699,22 @@ class DailyDeliveryScheduleWriteSerializer(serializers.ModelSerializer):
         customer = self.context['validated_customer']
         partner = self.context['validated_partner']
 
+        # Determine customer user account if present, otherwise fallback to request user (owner)
+        target_user = self.context['request'].user
+        if customer.phone:
+            from accounts.models import UserProfile
+            p_user = UserProfile.objects.filter(phone=customer.phone).first()
+            if p_user and p_user.user:
+                target_user = p_user.user
+
+        address = validated_data.pop('delivery_address', None) or customer.address or ''
+
         with transaction.atomic():
             schedule = DailyDeliverySchedule.objects.create(
                 customer_profile=customer,
-                customer_user=customer.user or self.context['request'].user,
+                customer_user=target_user,
                 delivery_partner=partner,
-                delivery_address=validated_data.get('delivery_address') or customer.address or '',
+                delivery_address=address,
                 **validated_data
             )
 
@@ -695,6 +740,17 @@ class DailyDeliveryScheduleWriteSerializer(serializers.ModelSerializer):
         items_data = validated_data.pop('items', None)
         validated_data.pop('customer_id', None)
         partner_id = validated_data.pop('delivery_partner_id', None)
+
+        if 'validated_customer' in self.context:
+            customer = self.context['validated_customer']
+            instance.customer_profile = customer
+            target_user = self.context['request'].user
+            if customer.phone:
+                from accounts.models import UserProfile
+                p_user = UserProfile.objects.filter(phone=customer.phone).first()
+                if p_user and p_user.user:
+                    target_user = p_user.user
+            instance.customer_user = target_user
 
         if partner_id and 'validated_partner' in self.context:
             instance.delivery_partner = self.context['validated_partner']
