@@ -5,9 +5,11 @@ from .views import (
     PriceOverrideRequestViewSet,
     RecurringOrderViewSet,
     GlobalRecurringNotificationSettingViewSet,
+    DailyDeliveryScheduleViewSet,
 )
 
 router = DefaultRouter()
+router.register(r'schedules', DailyDeliveryScheduleViewSet, basename='daily-delivery-schedule')
 router.register(r'price-overrides', PriceOverrideRequestViewSet, basename='price-override')
 router.register(r'recurring-settings', GlobalRecurringNotificationSettingViewSet, basename='recurring-settings')
 router.register(r'recurring', RecurringOrderViewSet, basename='recurring-order')
