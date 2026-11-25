@@ -3,6 +3,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from django.utils import timezone
+from django.db.models import Q
 from decimal import Decimal
 from .models import (
     Order, OrderItem, PriceOverrideRequest, RecurringOrder, RecurringOrderItem,
@@ -36,9 +37,9 @@ class OrderViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
 
     ALLOWED_TRANSITIONS = {
-        'pending': ['accepted', 'cancelled'],
-        'accepted': ['preparing', 'cancelled'],
-        'preparing': ['out_for_delivery', 'cancelled'],
+        'pending': ['accepted', 'preparing', 'out_for_delivery', 'delivered', 'cancelled'],
+        'accepted': ['preparing', 'out_for_delivery', 'delivered', 'cancelled'],
+        'preparing': ['out_for_delivery', 'delivered', 'cancelled'],
         'out_for_delivery': ['delivered', 'cancelled'],
         'delivered': [],
         'cancelled': [],
@@ -62,7 +63,11 @@ class OrderViewSet(viewsets.ModelViewSet):
             customer_id = self.request.query_params.get('customer')
             unbilled_param = self.request.query_params.get('unbilled')
             if status_param:
-                queryset = queryset.filter(status=status_param)
+                if status_param == 'delivered':
+                    # Support orders explicitly marked delivered or where assigned delivery completed
+                    queryset = queryset.filter(Q(status='delivered') | Q(delivery__status='delivered'))
+                else:
+                    queryset = queryset.filter(status=status_param)
             if company_id:
                 queryset = queryset.filter(company_id=company_id)
             if customer_id:
