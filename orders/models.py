@@ -20,6 +20,8 @@ class Order(models.Model):
     total_amount = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
     delivery_address = models.TextField()
     notes = models.TextField(blank=True, null=True)
+    scheduled_delivery_date = models.DateField(null=True, blank=True, db_index=True, help_text="Configured delivery date for scheduled orders")
+    scheduled_delivery_time = models.TimeField(null=True, blank=True, help_text="Configured customer delivery time (e.g. 10:00:00)")
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -255,4 +257,232 @@ class GlobalRecurringNotificationSetting(models.Model):
         if not instance:
             instance = cls.objects.create()
         return instance
+
+
+# ============================================================================
+# APPROVED FEATURE: DAILY DELIVERY SCHEDULE SYSTEM
+# Customer-specific scheduled delivery workflow with fixed partner assignment
+# ============================================================================
+
+class DailyDeliverySchedule(models.Model):
+    """
+    Customer-specific Daily Delivery Schedule:
+    - Customer (Profile & User reference)
+    - Selected delivery weekdays (0=Mon, 1=Tue, ..., 6=Sun)
+    - Customer-specific delivery time (e.g. 10:00:00)
+    - Fixed assigned DeliveryPartner (never changed automatically)
+    - Notification lead time in minutes (default 30)
+    - Start date and optional end date
+    - is_active toggle
+    """
+    customer_profile = models.ForeignKey(
+        'billing.Customer',
+        on_delete=models.CASCADE,
+        related_name='daily_delivery_schedules',
+        help_text="Primary Customer profile"
+    )
+    customer_user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='daily_delivery_schedules',
+        help_text="Associated auth User for the customer"
+    )
+    delivery_partner = models.ForeignKey(
+        'deliveries.DeliveryPartner',
+        on_delete=models.PROTECT,
+        related_name='fixed_delivery_schedules',
+        help_text="Fixed assigned delivery partner. Received by the same partner every day."
+    )
+    delivery_time = models.TimeField(
+        help_text="Customer-specific target delivery time (e.g. 10:00:00)"
+    )
+    notification_lead_time_minutes = models.PositiveIntegerField(
+        default=30,
+        help_text="Lead time in minutes before delivery_time to send the initial FCM push to the partner"
+    )
+    weekdays = models.CharField(
+        max_length=50,
+        default='0,1,2,3,4,5,6',
+        help_text="Comma-separated weekday numbers (0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri, 5=Sat, 6=Sun)"
+    )
+    delivery_address = models.TextField(
+        blank=True,
+        default='',
+        help_text="Customer delivery address snapshot for scheduled orders"
+    )
+    start_date = models.DateField(
+        db_index=True,
+        help_text="Schedule start date (inclusive)"
+    )
+    end_date = models.DateField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Optional schedule end date (inclusive)"
+    )
+    is_active = models.BooleanField(
+        default=True,
+        db_index=True,
+        help_text="Schedule active/inactive switch"
+    )
+    notes = models.TextField(
+        blank=True,
+        default=''
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        cname = self.customer_profile.name if self.customer_profile else self.customer_user.username
+        pname = self.delivery_partner.name if self.delivery_partner else "No Partner"
+        return f"DailySchedule #{self.id} - {cname} @ {self.delivery_time} (Fixed: {pname})"
+
+    def is_eligible_for_date(self, target_date) -> bool:
+        """
+        Validates if this schedule is active and scheduled to generate for target_date.
+        - Must be active
+        - target_date >= start_date
+        - target_date <= end_date (if end_date set)
+        - target_date.weekday() in configured weekdays
+        - target_date not in ScheduleCancellationException
+        """
+        if not self.is_active:
+            return False
+        if target_date < self.start_date:
+            return False
+        if self.end_date and target_date > self.end_date:
+            return False
+
+        # Weekdays check
+        if self.weekdays:
+            allowed_days = [int(w.strip()) for w in self.weekdays.split(',') if w.strip().isdigit()]
+            if target_date.weekday() not in allowed_days:
+                return False
+
+        # Date-specific exception check
+        if self.cancellation_exceptions.filter(cancelled_date=target_date).exists():
+            return False
+
+        return True
+
+
+class DailyDeliveryScheduleItem(models.Model):
+    """Product-wise quantities for a DailyDeliverySchedule."""
+    schedule = models.ForeignKey(
+        DailyDeliverySchedule,
+        on_delete=models.CASCADE,
+        related_name='items'
+    )
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.PROTECT
+    )
+    quantity = models.PositiveIntegerField(
+        default=1
+    )
+    unit_price = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        help_text="Optional negotiated unit price snapshot; 0.00 resolves standard rate"
+    )
+
+    def __str__(self):
+        return f"{self.quantity}x {self.product.name} (Schedule #{self.schedule_id})"
+
+
+class ScheduleCancellationException(models.Model):
+    """
+    Date-specific skip exception for a customer's delivery schedule:
+    - Allows skipping order generation for a specific date (CASE A)
+    - Preserves audit trail and reason
+    - Future dates remain active
+    """
+    schedule = models.ForeignKey(
+        DailyDeliverySchedule,
+        on_delete=models.CASCADE,
+        related_name='cancellation_exceptions'
+    )
+    cancelled_date = models.DateField(
+        db_index=True
+    )
+    reason = models.TextField(
+        blank=True,
+        default="Cancelled by Store Owner"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('schedule', 'cancelled_date')
+        ordering = ['-cancelled_date']
+
+    def __str__(self):
+        return f"Cancelled Exception: Schedule #{self.schedule_id} on {self.cancelled_date}"
+
+
+class DailyScheduleOrderExecution(models.Model):
+    """
+    Strict Idempotency Ledger:
+    - Exactly ONE order generated per (schedule, delivery_date)
+    - Repeated scheduler runs never produce duplicate orders
+    """
+    schedule = models.ForeignKey(
+        DailyDeliverySchedule,
+        on_delete=models.CASCADE,
+        related_name='executions'
+    )
+    order = models.OneToOneField(
+        Order,
+        on_delete=models.CASCADE,
+        related_name='daily_schedule_execution'
+    )
+    delivery_date = models.DateField(
+        db_index=True
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('schedule', 'delivery_date')
+        ordering = ['-delivery_date']
+
+    def __str__(self):
+        return f"Schedule #{self.schedule_id} on {self.delivery_date} -> Order #{self.order_id}"
+
+
+class ScheduleNotificationTracker(models.Model):
+    """
+    Tracks state and deduplication of automated push notifications for scheduled orders:
+    - 30 min before: initial notification to fixed partner
+    - 20 min before (10 min reminder): reminder if partner has not accepted
+    - 10 min before: escalation alert to owner if still not accepted
+    """
+    order = models.OneToOneField(
+        Order,
+        on_delete=models.CASCADE,
+        related_name='schedule_notification_tracker'
+    )
+    schedule = models.ForeignKey(
+        DailyDeliverySchedule,
+        on_delete=models.CASCADE,
+        related_name='notification_trackers'
+    )
+    delivery_date = models.DateField(db_index=True)
+    delivery_time = models.TimeField()
+    initial_notified_at = models.DateTimeField(null=True, blank=True)
+    reminder_notified_at = models.DateTimeField(null=True, blank=True)
+    owner_escalated_at = models.DateTimeField(null=True, blank=True)
+    partner_accepted_at = models.DateTimeField(null=True, blank=True)
+    is_cancelled = models.BooleanField(default=False, db_index=True)
+    fcm_failure_logged = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Tracker for Order #{self.order_id} ({self.delivery_date} @ {self.delivery_time})"
+
 

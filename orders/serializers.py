@@ -4,7 +4,8 @@ from django.db import transaction
 from django.utils import timezone
 from .models import (
     Order, OrderItem, PriceOverrideRequest, RecurringOrder, RecurringOrderItem,
-    RecurringOrderExecution, GlobalRecurringNotificationSetting
+    RecurringOrderExecution, GlobalRecurringNotificationSetting,
+    DailyDeliverySchedule, DailyDeliveryScheduleItem, ScheduleCancellationException
 )
 from products.models import Product
 from products.serializers import ProductSerializer
@@ -38,6 +39,7 @@ class OrderSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'customer', 'customer_profile', 'customer_name', 'customer_phone', 'company',
             'status', 'total_amount', 'delivery_address', 'notes',
+            'scheduled_delivery_date', 'scheduled_delivery_time',
             'delivery_partner_id', 'delivery_partner_name', 'delivery_status',
             'has_invoice', 'invoice_number', 'created_at', 'updated_at', 'items'
         ]
@@ -553,3 +555,171 @@ class RecurringOrderCreateUpdateSerializer(serializers.ModelSerializer):
                     )
 
         return instance
+
+
+# ============================================================================
+# APPROVED FEATURE: DAILY DELIVERY SCHEDULE SERIALIZERS
+# ============================================================================
+
+class DailyDeliveryScheduleItemSerializer(serializers.ModelSerializer):
+    product_name = serializers.CharField(source='product.name', read_only=True)
+    product_price = serializers.DecimalField(source='product.price', max_digits=10, decimal_places=2, read_only=True)
+
+    class Meta:
+        model = DailyDeliveryScheduleItem
+        fields = ['id', 'product', 'product_name', 'product_price', 'quantity', 'unit_price']
+
+
+class DailyDeliveryScheduleItemWriteSerializer(serializers.Serializer):
+    product_id = serializers.IntegerField()
+    quantity = serializers.IntegerField(min_value=1)
+    unit_price = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, default=Decimal('0.00'))
+
+
+class ScheduleCancellationExceptionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ScheduleCancellationException
+        fields = ['id', 'cancelled_date', 'reason', 'created_at']
+
+
+class DailyDeliveryScheduleSerializer(serializers.ModelSerializer):
+    items = DailyDeliveryScheduleItemSerializer(many=True, read_only=True)
+    cancellation_exceptions = ScheduleCancellationExceptionSerializer(many=True, read_only=True)
+    customer_name = serializers.CharField(source='customer_profile.name', read_only=True)
+    customer_phone = serializers.CharField(source='customer_profile.phone', read_only=True)
+    delivery_partner_name = serializers.CharField(source='delivery_partner.name', read_only=True)
+    delivery_partner_phone = serializers.CharField(source='delivery_partner.phone', read_only=True)
+    next_scheduled_delivery = serializers.SerializerMethodField()
+
+    class Meta:
+        model = DailyDeliverySchedule
+        fields = [
+            'id', 'customer_profile', 'customer_name', 'customer_phone',
+            'delivery_partner', 'delivery_partner_name', 'delivery_partner_phone',
+            'delivery_time', 'notification_lead_time_minutes', 'weekdays',
+            'delivery_address', 'start_date', 'end_date', 'is_active', 'notes',
+            'created_at', 'updated_at', 'items', 'cancellation_exceptions',
+            'next_scheduled_delivery'
+        ]
+
+    def get_next_scheduled_delivery(self, obj) -> str:
+        """Finds next eligible delivery date within next 14 days."""
+        from datetime import date, timedelta
+        from django.utils import timezone
+        import zoneinfo
+        tz = zoneinfo.ZoneInfo('Asia/Kolkata')
+        today = timezone.now().astimezone(tz).date()
+
+        for offset in range(0, 15):
+            candidate = today + timedelta(days=offset)
+            if obj.is_eligible_for_date(candidate):
+                return candidate.isoformat()
+        return None
+
+
+class DailyDeliveryScheduleWriteSerializer(serializers.ModelSerializer):
+    customer_id = serializers.IntegerField(write_only=True)
+    delivery_partner_id = serializers.IntegerField(write_only=True)
+    items = DailyDeliveryScheduleItemWriteSerializer(many=True, write_only=True)
+
+    class Meta:
+        model = DailyDeliverySchedule
+        fields = [
+            'id', 'customer_id', 'delivery_partner_id', 'delivery_time',
+            'notification_lead_time_minutes', 'weekdays', 'delivery_address',
+            'start_date', 'end_date', 'is_active', 'notes', 'items'
+        ]
+
+    def validate(self, attrs):
+        from billing.models import Customer
+        from deliveries.models import DeliveryPartner
+
+        customer_id = attrs.get('customer_id')
+        if customer_id:
+            try:
+                cust = Customer.objects.select_related('user').get(id=customer_id)
+                self.context['validated_customer'] = cust
+            except Customer.DoesNotExist:
+                raise serializers.ValidationError({'customer_id': 'Customer profile does not exist.'})
+
+        partner_id = attrs.get('delivery_partner_id')
+        if partner_id:
+            try:
+                partner = DeliveryPartner.objects.get(id=partner_id)
+                self.context['validated_partner'] = partner
+            except DeliveryPartner.DoesNotExist:
+                raise serializers.ValidationError({'delivery_partner_id': 'Delivery partner does not exist.'})
+
+        items = attrs.get('items', [])
+        if not items and self.instance is None:
+            raise serializers.ValidationError({'items': 'At least one product is required.'})
+
+        return attrs
+
+    def create(self, validated_data):
+        items_data = validated_data.pop('items', [])
+        validated_data.pop('customer_id', None)
+        validated_data.pop('delivery_partner_id', None)
+
+        customer = self.context['validated_customer']
+        partner = self.context['validated_partner']
+
+        with transaction.atomic():
+            schedule = DailyDeliverySchedule.objects.create(
+                customer_profile=customer,
+                customer_user=customer.user or self.context['request'].user,
+                delivery_partner=partner,
+                delivery_address=validated_data.get('delivery_address') or customer.address or '',
+                **validated_data
+            )
+
+            product_ids = [it['product_id'] for it in items_data]
+            products = {p.id: p for p in Product.objects.filter(id__in=product_ids)}
+
+            for it in items_data:
+                pid = it['product_id']
+                if pid not in products:
+                    raise serializers.ValidationError({'items': f"Product {pid} does not exist."})
+                prod = products[pid]
+                uprice = it.get('unit_price') or prod.price or Decimal('0.00')
+                DailyDeliveryScheduleItem.objects.create(
+                    schedule=schedule,
+                    product=prod,
+                    quantity=it['quantity'],
+                    unit_price=uprice
+                )
+
+        return schedule
+
+    def update(self, instance, validated_data):
+        items_data = validated_data.pop('items', None)
+        validated_data.pop('customer_id', None)
+        partner_id = validated_data.pop('delivery_partner_id', None)
+
+        if partner_id and 'validated_partner' in self.context:
+            instance.delivery_partner = self.context['validated_partner']
+
+        with transaction.atomic():
+            for attr, val in validated_data.items():
+                setattr(instance, attr, val)
+            instance.save()
+
+            if items_data is not None:
+                instance.items.all().delete()
+                product_ids = [it['product_id'] for it in items_data]
+                products = {p.id: p for p in Product.objects.filter(id__in=product_ids)}
+                for it in items_data:
+                    pid = it['product_id']
+                    if pid not in products:
+                        raise serializers.ValidationError({'items': f"Product {pid} does not exist."})
+                    prod = products[pid]
+                    uprice = it.get('unit_price') or prod.price or Decimal('0.00')
+                    DailyDeliveryScheduleItem.objects.create(
+                        schedule=instance,
+                        product=prod,
+                        quantity=it['quantity'],
+                        unit_price=uprice
+                    )
+
+        return instance
+

@@ -6,7 +6,8 @@ from django.utils import timezone
 from decimal import Decimal
 from .models import (
     Order, OrderItem, PriceOverrideRequest, RecurringOrder, RecurringOrderItem,
-    RecurringOrderExecution, GlobalRecurringNotificationSetting
+    RecurringOrderExecution, GlobalRecurringNotificationSetting,
+    DailyDeliverySchedule, DailyDeliveryScheduleItem, ScheduleCancellationException
 )
 from .serializers import (
     OrderSerializer,
@@ -14,6 +15,9 @@ from .serializers import (
     PriceOverrideRequestSerializer,
     RecurringOrderSerializer,
     RecurringOrderCreateUpdateSerializer,
+    DailyDeliveryScheduleSerializer,
+    DailyDeliveryScheduleWriteSerializer,
+    ScheduleCancellationExceptionSerializer,
     GlobalRecurringNotificationSettingSerializer,
 )
 from billing.invoicing_service import InvoicingService
@@ -501,5 +505,119 @@ class GlobalRecurringNotificationSettingViewSet(viewsets.ViewSet):
 
     def update(self, request, pk=None):
         return self.partial_update(request, pk)
+
+
+# ============================================================================
+# APPROVED FEATURE: DAILY DELIVERY SCHEDULE VIEWSET
+# Customer-specific scheduled delivery workflow with fixed partner assignment
+# ============================================================================
+
+class DailyDeliveryScheduleViewSet(viewsets.ModelViewSet):
+    """
+    CRUD and Operations for Customer Daily Delivery Schedules.
+    - Owner can create, edit, deactivate, or delete schedules.
+    - Date-specific skip: cancel_date action.
+    - On-demand date run: generate_date action.
+    """
+    permission_classes = [permissions.IsAuthenticated, IsOwnerUser]
+    queryset = DailyDeliverySchedule.objects.select_related(
+        'customer_profile', 'customer_user', 'delivery_partner'
+    ).prefetch_related('items', 'items__product', 'cancellation_exceptions').all()
+
+    def get_serializer_class(self):
+        if self.action in ['create', 'update', 'partial_update']:
+            return DailyDeliveryScheduleWriteSerializer
+        return DailyDeliveryScheduleSerializer
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        customer_id = self.request.query_params.get('customer')
+        if customer_id:
+            qs = qs.filter(customer_profile_id=customer_id)
+        is_active = self.request.query_params.get('is_active')
+        if is_active is not None:
+            qs = qs.filter(is_active=is_active.lower() in ['true', '1'])
+        return qs
+
+    @action(detail=True, methods=['post'], url_path='cancel-date')
+    def cancel_date(self, request, pk=None):
+        """
+        Owner Action: 'Cancel Today's Delivery' or a specific date's delivery.
+        CASE A: Order not generated yet -> records ScheduleCancellationException.
+        CASE B: Order already generated -> marks specific Order as cancelled, notifies partner.
+        Future dates remain completely active.
+        """
+        schedule = self.get_object()
+        date_param = request.data.get('date')
+        reason = request.data.get('reason', '')
+
+        if not date_param:
+            import zoneinfo
+            tz = zoneinfo.ZoneInfo('Asia/Kolkata')
+            target_date = timezone.now().astimezone(tz).date()
+        else:
+            import datetime
+            try:
+                target_date = datetime.date.fromisoformat(date_param)
+            except ValueError:
+                raise ValidationError({'date': 'Invalid date format. Expected YYYY-MM-DD.'})
+
+        from orders.daily_schedule_service import DailyScheduleService
+        try:
+            result = DailyScheduleService.cancel_date_delivery(schedule, target_date, reason)
+            return Response(result, status=status.HTTP_200_OK)
+        except ValueError as ve:
+            return Response({'error': str(ve)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['post'], url_path='generate-now')
+    def generate_now(self, request, pk=None):
+        """
+        Owner Action: On-demand manual order generation trigger for a schedule and date.
+        Respects idempotency, fixed partner assignment, and cancellation exceptions.
+        """
+        schedule = self.get_object()
+        date_param = request.data.get('date')
+
+        if not date_param:
+            import zoneinfo
+            tz = zoneinfo.ZoneInfo('Asia/Kolkata')
+            target_date = timezone.now().astimezone(tz).date()
+        else:
+            import datetime
+            try:
+                target_date = datetime.date.fromisoformat(date_param)
+            except ValueError:
+                raise ValidationError({'date': 'Invalid date format. Expected YYYY-MM-DD.'})
+
+        from orders.daily_schedule_service import DailyScheduleService
+        from orders.models import DailyScheduleOrderExecution
+
+        # Check existing execution
+        existing = DailyScheduleOrderExecution.objects.filter(
+            schedule=schedule, delivery_date=target_date
+        ).select_related('order').first()
+
+        if existing:
+            return Response({
+                'already_generated': True,
+                'message': f"Order #{existing.order_id} has already been generated for {target_date}.",
+                'order': OrderSerializer(existing.order).data,
+            }, status=status.HTTP_200_OK)
+
+        if not schedule.is_eligible_for_date(target_date):
+            return Response({
+                'error': f"Schedule #{schedule.id} is not eligible for {target_date} (check active status, weekdays, start/end dates, or date cancellation exception)."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        order = DailyScheduleService._create_scheduled_order(schedule, target_date)
+        if not order:
+            return Response({'error': 'Failed to create order (no items configured or race condition).'}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({
+            'success': True,
+            'message': f"Order #{order.id} generated successfully for {target_date}.",
+            'order': OrderSerializer(order).data,
+        }, status=status.HTTP_201_CREATED)
+
 
 
