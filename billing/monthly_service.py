@@ -300,3 +300,130 @@ class MonthlyBillingService:
             invoice.save(update_fields=['subtotal', 'discount_amount', 'grand_total'])
 
             return invoice
+
+    @classmethod
+    def get_monthly_invoice_breakdown(cls, invoice: Invoice) -> dict:
+        """
+        Builds the date-wise and order-wise detailed hierarchical breakdown for a monthly invoice:
+        Customer -> Billing Period -> Delivery Date -> Individual Order -> Product Item.
+        Includes daily subtotals, monthly subtotal, discounts, total paid, pending amount, and payment status.
+        """
+        # Fetch attached orders ordered by delivery date and order ID
+        invoice_orders = list(
+            invoice.invoice_orders.select_related('order', 'order__delivery')
+            .prefetch_related('order__items__product', 'order__delivery__delivered_items')
+            .all()
+        )
+
+        dates_dict = {}
+
+        for io in invoice_orders:
+            order = io.order
+            delivery = getattr(order, 'delivery', None)
+
+            # Determine delivery date (scheduled_delivery_date, or delivered_time/created_at)
+            if order.scheduled_delivery_date:
+                del_date = order.scheduled_delivery_date
+            elif delivery and delivery.delivered_time:
+                del_date = delivery.delivered_time.date()
+            elif order.created_at:
+                del_date = order.created_at.date()
+            else:
+                del_date = invoice.created_at.date()
+
+            date_key = del_date.isoformat()
+
+            if date_key not in dates_dict:
+                dates_dict[date_key] = {
+                    'date': del_date,
+                    'date_str': del_date.strftime('%d %b %Y'),
+                    'orders': [],
+                    'daily_subtotal': Decimal('0.00'),
+                    'daily_total_quantity': 0,
+                }
+
+            # Map actual delivered quantities if available
+            delivered_qty_map = {}
+            if delivery:
+                for di in delivery.delivered_items.all():
+                    if di.product_id:
+                        delivered_qty_map[di.product_id] = di.delivered_quantity
+
+            order_items_list = []
+            order_subtotal = Decimal('0.00')
+            order_total_qty = 0
+
+            for it in order.items.all():
+                pid = it.product_id
+                p_name = it.product.name if it.product else f"Product {pid}"
+                u_price = it.price
+                qty = delivered_qty_map.get(pid, it.quantity)
+                if qty <= 0:
+                    continue
+
+                line_amount = u_price * qty
+                order_subtotal += line_amount
+                order_total_qty += qty
+
+                order_items_list.append({
+                    'product_id': pid,
+                    'product_name': p_name,
+                    'quantity': qty,
+                    'unit_price': u_price,
+                    'line_amount': line_amount,
+                })
+
+            # Time string
+            time_str = ''
+            if order.scheduled_delivery_time:
+                time_str = order.scheduled_delivery_time.strftime('%I:%M %p')
+            elif delivery and delivery.delivered_time:
+                time_str = delivery.delivered_time.strftime('%I:%M %p')
+            elif order.created_at:
+                time_str = order.created_at.strftime('%I:%M %p')
+
+            dates_dict[date_key]['orders'].append({
+                'order_id': order.id,
+                'order_number': f"#{order.id}",
+                'time_str': time_str,
+                'items': order_items_list,
+                'order_subtotal': order_subtotal,
+                'order_total_qty': order_total_qty,
+            })
+
+            dates_dict[date_key]['daily_subtotal'] += order_subtotal
+            dates_dict[date_key]['daily_total_quantity'] += order_total_qty
+
+        # Sort dates chronologically
+        sorted_dates = [dates_dict[k] for k in sorted(dates_dict.keys())]
+
+        # Financial totals
+        subtotal = invoice.subtotal
+        discount = invoice.discount_amount or Decimal('0.00')
+        grand_total = invoice.grand_total
+        total_paid = Decimal(str(invoice.total_paid))
+        pending_amount = Decimal(str(invoice.pending_amount))
+
+        if invoice.status == 'paid' or pending_amount <= Decimal('0.00'):
+            status_display = "Paid"
+        elif total_paid > Decimal('0.00') or invoice.status == 'partially_paid':
+            status_display = "Partially Paid"
+        else:
+            status_display = "Unpaid"
+
+        return {
+            'invoice_id': invoice.id,
+            'invoice_number': invoice.invoice_number,
+            'billing_period': invoice.billing_period,
+            'billing_type': invoice.billing_type,
+            'customer_name': invoice.customer.name if invoice.customer else invoice.customer_name,
+            'customer_phone': invoice.customer.phone if invoice.customer else invoice.customer_phone,
+            'dates': sorted_dates,
+            'subtotal': subtotal,
+            'discount_amount': discount,
+            'grand_total': grand_total,
+            'total_paid': total_paid,
+            'pending_amount': pending_amount,
+            'payment_status': status_display,
+        }
+

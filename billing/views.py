@@ -671,6 +671,35 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         response['Content-Length'] = len(pdf_bytes)
         return response
 
+    @action(detail=True, methods=['get'])
+    def breakdown(self, request, pk=None):
+        """
+        Returns structured date-wise and order-wise breakdown for a monthly invoice.
+        Hierarchy: Customer -> Billing Period -> Delivery Date -> Individual Order -> Product Item.
+        """
+        invoice = self.get_object()
+        from .monthly_service import MonthlyBillingService
+        breakdown_data = MonthlyBillingService.get_monthly_invoice_breakdown(invoice)
+        return Response(breakdown_data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['get'])
+    def excel(self, request, pk=None):
+        """
+        Exports structured Excel (.xlsx) file for a monthly invoice with date-wise sections and daily subtotals.
+        """
+        invoice = self.get_object()
+        from .monthly_excel_generator import generate_monthly_invoice_excel
+        excel_bytes = generate_monthly_invoice_excel(invoice)
+
+        filename = f"ChaiFlow_Monthly_{invoice.invoice_number or f'INV-{invoice.id}'}.xlsx"
+        response = HttpResponse(
+            excel_bytes,
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        response['Content-Length'] = len(excel_bytes)
+        return response
+
     @action(detail=False, methods=['get'])
     def dashboard_stats(self, request):
         date_param = request.query_params.get('date', timezone.now().date().isoformat())

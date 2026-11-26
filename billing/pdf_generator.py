@@ -336,64 +336,177 @@ def generate_invoice_pdf(invoice) -> bytes:
     story.append(Spacer(1, 5 * mm))
 
     # ---------------------------------------------------------
-    # 3. PRODUCT TABLE
+    # 3. PRODUCT & ORDER BREAKDOWN SECTION
     # ---------------------------------------------------------
-    # Columns: Sr. (14mm), Product Description (84mm), Unit Price (26mm), Quantity (20mm), Total Amount (36mm) = 180mm
-    items_data = [[
-        Paragraph("Sr.", table_header_center_style),
-        Paragraph("Product Description", table_header_style),
-        Paragraph("Unit Price (Rs.)", table_header_right_style),
-        Paragraph("Quantity", table_header_center_style),
-        Paragraph("Total Amount (Rs.)", table_header_right_style),
-    ]]
+    is_monthly = getattr(invoice, 'billing_type', 'daily') == 'monthly'
+    has_invoice_orders = invoice.invoice_orders.exists()
 
-    invoice_items = list(invoice.items.all().order_by('id'))
-    if not invoice_items:
-        items_data.append([
-            Paragraph("1", table_cell_center_style),
-            Paragraph("General Beverage / Counter Order", table_cell_style),
-            Paragraph(f"{invoice.grand_total:.2f}", table_cell_right_style),
-            Paragraph("1", table_cell_center_style),
-            Paragraph(f"{invoice.grand_total:.2f}", table_cell_bold_right_style),
-        ])
-    else:
-        for idx, item in enumerate(invoice_items, 1):
+    if is_monthly and has_invoice_orders:
+        from .monthly_service import MonthlyBillingService
+        breakdown = MonthlyBillingService.get_monthly_invoice_breakdown(invoice)
+
+        # Date-wise breakdown table: Date & Order / Description (86mm), Rate (26mm), Qty (20mm), Total (36mm)
+        # Sr / Col 1 (12mm)
+        items_data = [[
+            Paragraph("Date / Order", table_header_style),
+            Paragraph("Product Description", table_header_style),
+            Paragraph("Rate (Rs.)", table_header_right_style),
+            Paragraph("Qty", table_header_center_style),
+            Paragraph("Amount (Rs.)", table_header_right_style),
+        ]]
+
+        t_style = [
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#8C331A')),
+            ('ALIGN', (2, 1), (2, -1), 'RIGHT'),
+            ('ALIGN', (3, 0), (3, -1), 'CENTER'),
+            ('ALIGN', (4, 1), (4, -1), 'RIGHT'),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('TOPPADDING', (0, 0), (-1, -1), 4.5),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4.5),
+            ('LEFTPADDING', (0, 0), (-1, -1), 6),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 6),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#EFEAE4')),
+        ]
+
+        subtotal_row_style = ParagraphStyle(
+            'SubRowStyle',
+            parent=styles['Normal'],
+            fontName='Helvetica-Bold',
+            fontSize=9,
+            leading=12,
+            textColor=colors.HexColor('#8C331A'),
+        )
+        subtotal_row_right_style = ParagraphStyle(
+            'SubRowRightStyle',
+            parent=subtotal_row_style,
+            alignment=2,
+        )
+        date_header_style = ParagraphStyle(
+            'DateHeadStyle',
+            parent=styles['Normal'],
+            fontName='Helvetica-Bold',
+            fontSize=9,
+            leading=12,
+            textColor=colors.HexColor('#2A2421'),
+        )
+        order_tag_style = ParagraphStyle(
+            'OrderTagStyle',
+            parent=styles['Normal'],
+            fontName='Helvetica-Bold',
+            fontSize=8.5,
+            leading=11,
+            textColor=colors.HexColor('#6B7280'),
+        )
+
+        for date_block in breakdown['dates']:
+            # Section header for delivery date
+            date_label = date_block['date_str']
             items_data.append([
-                Paragraph(str(idx), table_cell_center_style),
-                Paragraph(item.product_name, table_cell_style),
-                Paragraph(f"{item.unit_price:.2f}", table_cell_right_style),
-                Paragraph(str(item.quantity), table_cell_center_style),
-                Paragraph(f"{item.total_price:.2f}", table_cell_bold_right_style),
+                Paragraph(f"<b>{date_label}</b>", date_header_style),
+                Paragraph("", table_cell_style),
+                Paragraph("", table_cell_style),
+                Paragraph("", table_cell_style),
+                Paragraph("", table_cell_style),
             ])
+            date_row_idx = len(items_data) - 1
+            t_style.append(('BACKGROUND', (0, date_row_idx), (-1, date_row_idx), colors.HexColor('#FDF2EC')))
+            t_style.append(('SPAN', (0, date_row_idx), (-1, date_row_idx)))
 
-    items_table = Table(
-        items_data,
-        colWidths=[14 * mm, 84 * mm, 26 * mm, 20 * mm, 36 * mm],
-        repeatRows=1,
-    )
+            for ord_data in date_block['orders']:
+                order_lbl = f"{ord_data['order_number']}"
+                if ord_data.get('time_str'):
+                    order_lbl += f" ({ord_data['time_str']})"
 
-    t_style = [
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#8C331A')),
-        ('ALIGN', (0, 0), (0, -1), 'CENTER'),
-        ('ALIGN', (2, 1), (2, -1), 'RIGHT'),
-        ('ALIGN', (3, 0), (3, -1), 'CENTER'),
-        ('ALIGN', (4, 1), (4, -1), 'RIGHT'),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('TOPPADDING', (0, 0), (-1, -1), 6.5),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 6.5),
-        ('LEFTPADDING', (0, 0), (-1, -1), 8),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 8),
-        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#EFEAE4')),
-    ]
+                first_item = True
+                for itm in ord_data['items']:
+                    items_data.append([
+                        Paragraph(order_lbl if first_item else "", order_tag_style),
+                        Paragraph(itm['product_name'], table_cell_style),
+                        Paragraph(f"{itm['unit_price']:.2f}", table_cell_right_style),
+                        Paragraph(str(itm['quantity']), table_cell_center_style),
+                        Paragraph(f"{itm['line_amount']:.2f}", table_cell_right_style),
+                    ])
+                    first_item = False
 
-    # Alternating subtle row colors
-    for r in range(1, len(items_data)):
-        bg_col = colors.HexColor('#FFFFFF') if r % 2 != 0 else colors.HexColor('#FAF8F5')
-        t_style.append(('BACKGROUND', (0, r), (-1, r), bg_col))
+            # Daily Subtotal row
+            items_data.append([
+                Paragraph(f"Daily Total ({date_label})", subtotal_row_style),
+                Paragraph("", subtotal_row_style),
+                Paragraph("", subtotal_row_style),
+                Paragraph(f"{date_block['daily_total_quantity']}", table_header_center_style),
+                Paragraph(f"Rs. {date_block['daily_subtotal']:.2f}", subtotal_row_right_style),
+            ])
+            sub_row_idx = len(items_data) - 1
+            t_style.append(('SPAN', (0, sub_row_idx), (2, sub_row_idx)))
+            t_style.append(('BACKGROUND', (0, sub_row_idx), (-1, sub_row_idx), colors.HexColor('#FAF5F0')))
 
-    items_table.setStyle(TableStyle(t_style))
-    story.append(items_table)
-    story.append(Spacer(1, 4 * mm))
+        items_table = Table(
+            items_data,
+            colWidths=[36 * mm, 62 * mm, 26 * mm, 18 * mm, 38 * mm],
+            repeatRows=1,
+        )
+        items_table.setStyle(TableStyle(t_style))
+        story.append(items_table)
+        story.append(Spacer(1, 4 * mm))
+
+    else:
+        # Standard Single / Consolidated Product Table
+        # Columns: Sr. (14mm), Product Description (84mm), Unit Price (26mm), Quantity (20mm), Total Amount (36mm) = 180mm
+        items_data = [[
+            Paragraph("Sr.", table_header_center_style),
+            Paragraph("Product Description", table_header_style),
+            Paragraph("Unit Price (Rs.)", table_header_right_style),
+            Paragraph("Quantity", table_header_center_style),
+            Paragraph("Total Amount (Rs.)", table_header_right_style),
+        ]]
+
+        invoice_items = list(invoice.items.all().order_by('id'))
+        if not invoice_items:
+            items_data.append([
+                Paragraph("1", table_cell_center_style),
+                Paragraph("General Beverage / Counter Order", table_cell_style),
+                Paragraph(f"{invoice.grand_total:.2f}", table_cell_right_style),
+                Paragraph("1", table_cell_center_style),
+                Paragraph(f"{invoice.grand_total:.2f}", table_cell_bold_right_style),
+            ])
+        else:
+            for idx, item in enumerate(invoice_items, 1):
+                items_data.append([
+                    Paragraph(str(idx), table_cell_center_style),
+                    Paragraph(item.product_name, table_cell_style),
+                    Paragraph(f"{item.unit_price:.2f}", table_cell_right_style),
+                    Paragraph(str(item.quantity), table_cell_center_style),
+                    Paragraph(f"{item.total_price:.2f}", table_cell_bold_right_style),
+                ])
+
+        items_table = Table(
+            items_data,
+            colWidths=[14 * mm, 84 * mm, 26 * mm, 20 * mm, 36 * mm],
+            repeatRows=1,
+        )
+
+        t_style = [
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#8C331A')),
+            ('ALIGN', (0, 0), (0, -1), 'CENTER'),
+            ('ALIGN', (2, 1), (2, -1), 'RIGHT'),
+            ('ALIGN', (3, 0), (3, -1), 'CENTER'),
+            ('ALIGN', (4, 1), (4, -1), 'RIGHT'),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('TOPPADDING', (0, 0), (-1, -1), 6.5),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6.5),
+            ('LEFTPADDING', (0, 0), (-1, -1), 8),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 8),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#EFEAE4')),
+        ]
+
+        # Alternating subtle row colors
+        for r in range(1, len(items_data)):
+            bg_col = colors.HexColor('#FFFFFF') if r % 2 != 0 else colors.HexColor('#FAF8F5')
+            t_style.append(('BACKGROUND', (0, r), (-1, r), bg_col))
+
+        items_table.setStyle(TableStyle(t_style))
+        story.append(items_table)
+        story.append(Spacer(1, 4 * mm))
 
     # ---------------------------------------------------------
     # 4. PAYMENT & TOTAL SUMMARY SECTION
