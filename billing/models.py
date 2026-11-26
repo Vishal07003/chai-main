@@ -66,10 +66,15 @@ class Customer(models.Model):
     Centralized Customer entity for Chai Flow:
     - Name, Mobile number (+91), Delivery address
     - Preserves link to historical Company if migrated
+    - Individual billing cycle day (1-31) for monthly billing
     """
     name = models.CharField(max_length=200, db_index=True)
     phone = models.CharField(max_length=15, blank=True, default='', db_index=True)
     address = models.TextField(blank=True, default='')
+    billing_cycle_day = models.PositiveSmallIntegerField(
+        default=1,
+        help_text="Day of month (1-31) when customer monthly billing cycle starts"
+    )
     company = models.ForeignKey('Company', on_delete=models.SET_NULL, null=True, blank=True, related_name='individual_contacts')
     created_at = models.DateTimeField(auto_now_add=True)
 

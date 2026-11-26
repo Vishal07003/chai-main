@@ -83,12 +83,23 @@ class CustomerSerializer(serializers.ModelSerializer):
     class Meta:
         model = Customer
         fields = [
-            'id', 'name', 'phone', 'address', 'created_at',
+            'id', 'name', 'phone', 'address', 'billing_cycle_day', 'created_at',
             'total_bills', 'total_billed_amount', 'total_paid_amount', 'total_pending_amount',
             'is_defaulter', 'has_overdue',
             'custom_prices'
         ]
         read_only_fields = ['id', 'created_at', 'total_bills', 'total_billed_amount', 'total_paid_amount', 'total_pending_amount', 'is_defaulter', 'has_overdue', 'custom_prices']
+
+    def validate_billing_cycle_day(self, value):
+        if value is None:
+            return 1
+        try:
+            val_int = int(value)
+        except (ValueError, TypeError):
+            raise serializers.ValidationError("Billing cycle day must be an integer between 1 and 31.")
+        if val_int < 1 or val_int > 31:
+            raise serializers.ValidationError("Billing cycle day must be between 1 and 31.")
+        return val_int
 
     def validate_name(self, value):
         if not value or not value.strip():

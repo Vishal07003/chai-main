@@ -21,22 +21,83 @@ class MonthlyBillingService:
     """
 
     @classmethod
-    def get_month_date_range(cls, year: int, month: int):
-        _, last_day = calendar.monthrange(year, month)
-        start_date = date(year, month, 1)
-        end_date = date(year, month, last_day)
+    def clamp_day_to_month(cls, year: int, month: int, day: int) -> int:
+        """
+        Clamp day of month to maximum calendar days for given year and month.
+        E.g., day 31 in April (30 days) -> 30; day 31 in Feb 2024 -> 29; day 31 in Feb 2023 -> 28.
+        """
+        _, max_days = calendar.monthrange(year, month)
+        return min(max(1, day), max_days)
+
+    @classmethod
+    def get_customer_billing_period(cls, customer_or_cycle_day, year: int, month: int):
+        """
+        Calculate customer-specific billing period based on customer's billing_cycle_day.
+        Returns:
+            start_date: inclusive start date (e.g. Nov 10, 2026)
+            end_date: inclusive end date (e.g. Dec 9, 2026)
+            start_dt: timezone-aware start datetime (min time on start_date)
+            end_dt: timezone-aware end datetime (max time on end_date)
+            period_str: formatted period identifier 'YYYY-MM'
+
+        Cycle day behavior:
+        - If cycle_day is 1: starts on 1st of month, ends on last day of same month.
+        - If cycle_day is N (2..31):
+          Cycle for (year, month) starts on day N of (year, month) [clamped to last day of that month]
+          and ends on the day before day N of the next month [clamped to last day of next month].
+          Example: Day 10 for (2026, 11): Nov 10, 2026 to Dec 9, 2026.
+          Example: Day 31 for (2026, 1): Jan 31, 2026 to Feb 27, 2026 (or Feb 28 in leap year).
+          Example: Day 30 for (2026, 1): Jan 30, 2026 to Feb 27, 2026.
+        """
+        if isinstance(customer_or_cycle_day, (int, str)):
+            cycle_day = int(customer_or_cycle_day)
+        else:
+            cycle_day = getattr(customer_or_cycle_day, 'billing_cycle_day', 1) or 1
+
+        cycle_day = max(1, min(31, cycle_day))
+        period_str = f"{year:04d}-{month:02d}"
+
+        if cycle_day == 1:
+            _, last_day = calendar.monthrange(year, month)
+            start_date = date(year, month, 1)
+            end_date = date(year, month, last_day)
+        else:
+            start_day = cls.clamp_day_to_month(year, month, cycle_day)
+            start_date = date(year, month, start_day)
+
+            # Next month calculation
+            if month == 12:
+                next_year = year + 1
+                next_month = 1
+            else:
+                next_year = year
+                next_month = month + 1
+
+            next_start_day = cls.clamp_day_to_month(next_year, next_month, cycle_day)
+            next_start_date = date(next_year, next_month, next_start_day)
+            from datetime import timedelta
+            end_date = next_start_date - timedelta(days=1)
+
         start_dt = timezone.make_aware(datetime.combine(start_date, time.min))
         end_dt = timezone.make_aware(datetime.combine(end_date, time.max))
         return start_date, end_date, start_dt, end_dt
 
     @classmethod
+    def get_month_date_range(cls, year: int, month: int):
+        """
+        Standard calendar month date range (1st to last calendar day).
+        Maintained for backwards-compatibility.
+        """
+        return cls.get_customer_billing_period(1, year, month)
+
+    @classmethod
     def get_eligible_unbilled_orders(cls, customer: Customer, year: int, month: int):
         """
-        Find all delivered orders for the customer within the specified calendar month
-        that have NOT yet been invoiced.
+        Find all delivered orders for the customer within the customer's billing cycle period
+        for the given year and month that have NOT yet been invoiced.
         Includes orders from both Daily Schedule and Quick Billing / One-Time.
         """
-        start_date, end_date, start_dt, end_dt = cls.get_month_date_range(year, month)
+        start_date, end_date, start_dt, end_dt = cls.get_customer_billing_period(customer, year, month)
 
         # Delivered orders matching customer_profile or customer_user linked to this profile
         q_customer = models.Q(customer_profile=customer)
