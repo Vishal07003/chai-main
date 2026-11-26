@@ -12,11 +12,34 @@ from products.serializers import ProductSerializer
 
 class OrderItemReadSerializer(serializers.ModelSerializer):
     product_details = ProductSerializer(source='product', read_only=True)
+    product_name = serializers.SerializerMethodField()
+    unit_price = serializers.DecimalField(source='price', max_digits=10, decimal_places=2, read_only=True)
+    ordered_quantity = serializers.IntegerField(source='quantity', read_only=True)
+    delivered_quantity = serializers.SerializerMethodField()
+    has_discrepancy = serializers.SerializerMethodField()
 
     class Meta:
         model = OrderItem
-        fields = ['id', 'product', 'product_details', 'quantity', 'price']
-        read_only_fields = ['id', 'product', 'product_details', 'quantity', 'price']
+        fields = [
+            'id', 'product', 'product_name', 'product_details', 'quantity', 'ordered_quantity',
+            'delivered_quantity', 'has_discrepancy', 'price', 'unit_price'
+        ]
+        read_only_fields = fields
+
+    def get_product_name(self, obj):
+        return obj.product.name if obj.product else 'Item'
+
+    def get_delivered_quantity(self, obj):
+        delivery = getattr(obj.order, 'delivery', None)
+        if delivery:
+            d_item = delivery.delivered_items.filter(product_id=obj.product_id).first()
+            if d_item:
+                return d_item.delivered_quantity
+        return obj.quantity
+
+    def get_has_discrepancy(self, obj):
+        deliv_qty = self.get_delivered_quantity(obj)
+        return deliv_qty != obj.quantity
 
 class OrderItemWriteSerializer(serializers.Serializer):
     product_id = serializers.IntegerField()
@@ -25,6 +48,7 @@ class OrderItemWriteSerializer(serializers.Serializer):
     discount_reason = serializers.CharField(required=False, allow_blank=True)
 
 class OrderSerializer(serializers.ModelSerializer):
+    order_number = serializers.SerializerMethodField()
     items = OrderItemReadSerializer(many=True, read_only=True)
     customer_name = serializers.SerializerMethodField()
     customer_phone = serializers.SerializerMethodField()
@@ -37,15 +61,18 @@ class OrderSerializer(serializers.ModelSerializer):
     class Meta:
         model = Order
         fields = [
-            'id', 'customer', 'customer_profile', 'customer_name', 'customer_phone', 'company',
+            'id', 'order_number', 'customer', 'customer_profile', 'customer_name', 'customer_phone', 'company',
             'status', 'total_amount', 'delivery_address', 'notes',
             'scheduled_delivery_date', 'scheduled_delivery_time',
             'delivery_partner_id', 'delivery_partner_name', 'delivery_status',
             'has_invoice', 'invoice_number', 'order_type', 'created_at', 'updated_at', 'items'
         ]
-        read_only_fields = ['id', 'customer', 'customer_name', 'customer_phone', 'delivery_partner_id', 'delivery_partner_name', 'delivery_status', 'total_amount', 'has_invoice', 'invoice_number', 'order_type', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'order_number', 'customer', 'customer_name', 'customer_phone', 'delivery_partner_id', 'delivery_partner_name', 'delivery_status', 'total_amount', 'has_invoice', 'invoice_number', 'order_type', 'created_at', 'updated_at']
 
     order_type = serializers.SerializerMethodField()
+
+    def get_order_number(self, obj):
+        return f"ORD-{obj.id:04d}" if obj.id else f"ORD-{obj.id}"
 
     def get_order_type(self, obj):
         if hasattr(obj, 'daily_schedule_execution') and obj.daily_schedule_execution is not None:
