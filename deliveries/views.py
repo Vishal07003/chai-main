@@ -32,8 +32,8 @@ class DeliveryViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
 
     ALLOWED_STATUS_TRANSITIONS = {
-        'assigned': ['accepted', 'picked_up', 'failed'],
-        'accepted': ['picked_up', 'failed'],
+        'assigned': ['accepted', 'picked_up', 'on_the_way', 'delivered', 'failed'],
+        'accepted': ['picked_up', 'on_the_way', 'delivered', 'failed'],
         'picked_up': ['on_the_way', 'delivered', 'failed'],
         'on_the_way': ['delivered', 'failed'],
         'delivered': [],

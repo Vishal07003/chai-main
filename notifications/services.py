@@ -317,18 +317,46 @@ class NotificationService:
     # 4. High-Level Role-Based Domain Event Handlers
     # -------------------------------------------------------------
     @classmethod
+    def _is_duplicate_event(cls, dedup_key: str) -> bool:
+        """
+        Check if a notification event with this deduplication key has already been logged.
+        """
+        if not dedup_key:
+            return False
+        return NotificationLog.objects.filter(data_payload__dedup_key=dedup_key).exists()
+
+    @classmethod
     def on_order_created(cls, order):
         """1. New customer order -> Notify Business Owners (FCM)"""
-        transaction.on_commit(lambda: cls.send_to_role(
-            role='owner',
-            title="New Order Received! ☕",
-            body=f"Order #{order.id} for ₹{order.total_amount} placed by {order.customer.username}.",
-            data={
-                'type': 'new_order',
-                'order_id': order.id,
-                'screen': 'Orders',
-            }
-        ))
+        dedup_key = f"order_created_{order.id}"
+
+        def dispatch():
+            if cls._is_duplicate_event(dedup_key):
+                logger.info(f"[NotificationService] Skipping duplicate order_created for #{order.id}")
+                return
+
+            cust_name = getattr(order.customer_profile, 'name', None) or order.customer.get_full_name() or order.customer.username
+            order_num = f"ORD-{order.id:04d}"
+            address = order.delivery_address or 'Counter Pickup'
+            total_str = f"₹{order.total_amount}"
+
+            cls.send_to_role(
+                role='owner',
+                title="New Order Received! ☕",
+                body=f"{order_num} for {total_str} from {cust_name} ({address}).",
+                data={
+                    'type': 'new_order',
+                    'order_id': order.id,
+                    'order_number': order_num,
+                    'customer_name': cust_name,
+                    'delivery_address': address,
+                    'total_amount': str(order.total_amount),
+                    'screen': 'Orders',
+                    'dedup_key': dedup_key,
+                }
+            )
+
+        transaction.on_commit(dispatch)
 
     @classmethod
     def on_order_status_updated(cls, order):
@@ -344,54 +372,119 @@ class NotificationService:
         msg = status_messages.get(order.status)
         if msg:
             title, body = msg
-            transaction.on_commit(lambda: cls.send_to_user(
-                user=order.customer,
-                title=title,
-                body=body,
-                data={
-                    'type': 'order_status',
-                    'order_id': order.id,
-                    'status': order.status,
-                    'screen': 'Orders',
-                }
-            ))
+            dedup_key = f"order_status_{order.id}_{order.status}"
+
+            def dispatch():
+                if cls._is_duplicate_event(dedup_key):
+                    return
+                cls.send_to_user(
+                    user=order.customer,
+                    title=title,
+                    body=body,
+                    data={
+                        'type': 'order_status',
+                        'order_id': order.id,
+                        'status': order.status,
+                        'screen': 'Orders',
+                        'dedup_key': dedup_key,
+                    }
+                )
+
+            transaction.on_commit(dispatch)
 
     @classmethod
     def on_delivery_assigned(cls, delivery):
         """3. Delivery assigned -> Notify Delivery Partner (FCM & SMS alert)"""
-        if delivery.driver:
-            transaction.on_commit(lambda: cls.send_to_user(
-                user=delivery.driver,
+        if not delivery.driver:
+            return
+
+        driver_user = delivery.driver
+        delivery_id = delivery.id
+        order = delivery.order
+        dedup_key = f"delivery_assigned_{delivery_id}_{driver_user.id}"
+
+        def dispatch():
+            if cls._is_duplicate_event(dedup_key):
+                logger.info(f"[NotificationService] Skipping duplicate delivery_assigned for delivery #{delivery_id}")
+                return
+
+            cust_name = getattr(order.customer_profile, 'name', None) or order.customer.get_full_name() or order.customer.username
+            order_num = f"ORD-{order.id:04d}"
+            address = delivery.order.delivery_address or 'Local delivery'
+
+            # Items summary for partner
+            items_summary = ", ".join([f"{it.quantity}x {it.product.name}" for it in order.items.select_related('product')[:3]])
+
+            body_text = f"{order_num} for {cust_name}: Deliver to {address}. ({items_summary})"
+
+            cls.send_to_user(
+                user=driver_user,
                 title="New Delivery Assigned 🚴",
-                body=f"You have been assigned Order #{delivery.order.id} to {delivery.order.delivery_address}.",
+                body=body_text,
                 data={
                     'type': 'delivery_assigned',
-                    'delivery_id': delivery.id,
-                    'order_id': delivery.order.id,
+                    'delivery_id': delivery_id,
+                    'order_id': order.id,
+                    'order_number': order_num,
+                    'customer_name': cust_name,
+                    'delivery_address': address,
                     'screen': 'OrderDetails',
+                    'dedup_key': dedup_key,
                 }
-            ))
-            # Also dispatch SMS alert to driver if registered mobile number exists
-            driver_phone = getattr(getattr(delivery.driver, 'profile', None), 'phone', '')
+            )
+
+            # Also dispatch SMS alert to driver if phone exists
+            driver_phone = getattr(getattr(driver_user, 'profile', None), 'phone', '')
             if driver_phone:
-                transaction.on_commit(lambda: cls.send_sms(
+                cls.send_sms(
                     phone=driver_phone,
-                    message=f"ChaiFlow: You are assigned Order #{delivery.order.id}. Deliver to {delivery.order.delivery_address}.",
-                    recipient=delivery.driver,
+                    message=f"ChaiFlow: Assigned {order_num} for {cust_name}. Deliver to {address}.",
+                    recipient=driver_user,
                     target_role='delivery',
-                ))
+                )
+
+        transaction.on_commit(dispatch)
 
     @classmethod
     def on_delivery_completed(cls, delivery):
         """4. Delivery marked completed -> Notify Owner"""
-        transaction.on_commit(lambda: cls.send_to_role(
-            role='owner',
-            title="Order Delivered 🚴",
-            body=f"Order #{delivery.order.id} has been successfully delivered by {delivery.driver.username if delivery.driver else 'partner'}.",
-            data={
-                'type': 'delivery_completed',
-                'delivery_id': delivery.id,
-                'order_id': delivery.order.id,
-                'screen': 'Orders',
-            }
-        ))
+        delivery_id = delivery.id
+        order = delivery.order
+        dedup_key = f"delivery_completed_{delivery_id}"
+
+        def dispatch():
+            if cls._is_duplicate_event(dedup_key):
+                logger.info(f"[NotificationService] Skipping duplicate delivery_completed for delivery #{delivery_id}")
+                return
+
+            partner_name = delivery.driver.get_full_name() or delivery.driver.username if delivery.driver else 'Delivery Partner'
+            cust_name = getattr(order.customer_profile, 'name', None) or order.customer.get_full_name() or order.customer.username
+            order_num = f"ORD-{order.id:04d}"
+
+            # Delivered quantities summary
+            delivered_items_list = list(delivery.delivered_items.select_related('product'))
+            if delivered_items_list:
+                qty_summary = ", ".join([f"{it.delivered_quantity}x {it.product.name}" for it in delivered_items_list[:3]])
+            else:
+                qty_summary = f"{order.items.count()} items"
+
+            body_text = f"{order_num} ({cust_name}) delivered by {partner_name}. Quantities: {qty_summary}."
+
+            cls.send_to_role(
+                role='owner',
+                title="Delivery Completed 🎉",
+                body=body_text,
+                data={
+                    'type': 'delivery_completed',
+                    'delivery_id': delivery_id,
+                    'order_id': order.id,
+                    'order_number': order_num,
+                    'customer_name': cust_name,
+                    'partner_name': partner_name,
+                    'status': 'delivered',
+                    'screen': 'Orders',
+                    'dedup_key': dedup_key,
+                }
+            )
+
+        transaction.on_commit(dispatch)
