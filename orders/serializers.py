@@ -252,12 +252,13 @@ class OrderCreateSerializer(serializers.ModelSerializer):
             # Trigger FCM notification to Owner
             from notifications.services import NotificationService
             NotificationService.on_order_created(order)
+
+            # When an order is created with an assigned Delivery Partner:
+            # - Immediate delivery (no future delivery date/time specified, or scheduled for today within 30 min):
+            #   notify assigned partner immediately.
+            # - Future delivery (scheduled delivery date > today or delivery time > now + 30 mins):
+            #   deferred to 30 mins prior to delivery time.
             if driver_user:
-                # Notification rules for one-time / direct order:
-                # - Immediate delivery (no future delivery date/time specified, or scheduled for today within 30 min):
-                #   notify assigned partner immediately.
-                # - Future delivery (scheduled delivery date > today or delivery time > now + 30 mins):
-                #   will be dispatched 30 mins prior to delivery time by the automated notification engine or on-demand.
                 import zoneinfo
                 from datetime import datetime, timedelta
                 kolkata_tz = zoneinfo.ZoneInfo('Asia/Kolkata')
