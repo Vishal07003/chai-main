@@ -107,6 +107,11 @@ class Invoice(models.Model):
         ('paid', 'Paid'),
         ('void', 'Void / Cancelled'),
     )
+    BILLING_TYPE_CHOICES = (
+        ('daily', 'Daily / Single Order'),
+        ('quick', 'Quick Billing'),
+        ('monthly', 'Monthly Consolidated'),
+    )
 
     invoice_number = models.CharField(max_length=50, unique=True, db_index=True)
     order = models.OneToOneField(
@@ -115,8 +120,10 @@ class Invoice(models.Model):
         null=True,
         blank=True,
         related_name='invoice',
-        help_text="One official invoice per order. PROTECT prevents deleting order while invoice exists."
+        help_text="One official invoice per order (daily). Blank for monthly consolidated invoices. PROTECT prevents deleting order while invoice exists."
     )
+    billing_type = models.CharField(max_length=20, choices=BILLING_TYPE_CHOICES, default='daily', db_index=True)
+    billing_period = models.CharField(max_length=7, blank=True, null=True, db_index=True, help_text="YYYY-MM for monthly consolidated invoices")
     company = models.ForeignKey(Company, on_delete=models.PROTECT, null=True, blank=True, related_name='invoices')
     customer = models.ForeignKey(Customer, on_delete=models.SET_NULL, null=True, blank=True, related_name='invoices')
     customer_name = models.CharField(max_length=200, default='Walk-in Customer')
@@ -133,6 +140,10 @@ class Invoice(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['customer', 'billing_period']),
+            models.Index(fields=['billing_type', 'billing_period']),
+        ]
 
     def __str__(self):
         return f"{self.invoice_number} - {self.customer_name} ({self.status})"

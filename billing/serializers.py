@@ -209,13 +209,13 @@ class InvoiceDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = Invoice
         fields = [
-            'id', 'invoice_number', 'order', 'company', 'company_name',
+            'id', 'invoice_number', 'order', 'billing_type', 'billing_period', 'company', 'company_name',
             'customer', 'customer_name', 'customer_phone',
             'subtotal', 'discount_amount', 'grand_total', 'status', 'due_date', 'finalized_at', 'notes', 'created_at',
             'items', 'payments', 'allocations', 'audit_logs', 'total_paid', 'pending_amount', 'is_overdue'
         ]
         read_only_fields = [
-            'id', 'invoice_number', 'order', 'created_at', 'status', 'finalized_at',
+            'id', 'invoice_number', 'order', 'billing_type', 'billing_period', 'created_at', 'status', 'finalized_at',
             'total_paid', 'pending_amount', 'company_name', 'is_overdue', 'audit_logs'
         ]
 

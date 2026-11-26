@@ -3,7 +3,7 @@ from datetime import date, datetime, time
 from decimal import Decimal
 from django.db import models
 from django.utils import timezone
-from .models import Company, Invoice, Payment, PaymentAllocation, LedgerAdjustment
+from .models import Company, Customer, Invoice, Payment, PaymentAllocation, LedgerAdjustment
 
 class LedgerService:
     """
@@ -287,4 +287,158 @@ class LedgerService:
             },
             'transactions': timeline,
         }
+
+    @classmethod
+    def get_customer_monthly_ledger_overview(cls, customer: Customer) -> dict:
+        """
+        Requirements 6: Provide comprehensive customer-wise monthly records:
+        - Billing month
+        - Invoice number
+        - Total bill
+        - Amount received
+        - Remaining balance
+        - Payment status
+        - Payment history
+        - Total outstanding balance across all months
+        - Cash collection history
+        - Payment allocation details
+        """
+        all_invoices = Invoice.objects.filter(customer=customer).exclude(status='void').order_by('-created_at')
+        all_payments = Payment.objects.filter(customer=customer).order_by('-received_at')
+
+        monthly_records = []
+        for inv in all_invoices:
+            # Gather payment allocations for this specific invoice
+            allocations = []
+            for alloc in inv.allocations.select_related('payment').order_by('allocated_at'):
+                allocations.append({
+                    'allocation_id': alloc.id,
+                    'payment_id': alloc.payment_id,
+                    'allocated_amount': str(alloc.allocated_amount),
+                    'payment_method': alloc.payment.method,
+                    'allocated_at': alloc.allocated_at.isoformat(),
+                    'notes': alloc.notes,
+                })
+
+            period_label = inv.billing_period or (inv.created_at.strftime('%Y-%m') if inv.created_at else '')
+
+            monthly_records.append({
+                'invoice_id': inv.id,
+                'invoice_number': inv.invoice_number,
+                'billing_type': inv.billing_type,
+                'billing_month': period_label,
+                'total_bill': str(inv.grand_total),
+                'amount_received': str(inv.total_paid),
+                'remaining_balance': str(inv.pending_amount),
+                'status': inv.status.upper(),
+                'created_at': inv.created_at.isoformat() if inv.created_at else None,
+                'allocations': allocations,
+            })
+
+        # Calculate overall net outstanding across all invoices
+        total_invoiced = sum(Decimal(str(r['total_bill'])) for r in monthly_records)
+        total_allocated = sum(Decimal(str(r['amount_received'])) for r in monthly_records)
+        total_outstanding = max(Decimal('0.00'), total_invoiced - total_allocated)
+
+        payment_history = []
+        for p in all_payments:
+            payment_history.append({
+                'payment_id': p.id,
+                'amount': str(p.amount),
+                'method': p.method,
+                'received_at': p.received_at.isoformat(),
+                'total_allocated': str(p.total_allocated),
+                'unallocated_amount': str(p.unallocated_amount),
+                'reference_number': p.reference_number,
+                'notes': p.notes,
+            })
+
+        return {
+            'customer': {
+                'id': customer.id,
+                'name': customer.name,
+                'phone': customer.phone,
+            },
+            'total_outstanding': str(total_outstanding),
+            'monthly_records': monthly_records,
+            'payment_history': payment_history,
+        }
+
+
+    @classmethod
+    def get_customer_monthly_ledger_overview(cls, customer: Customer) -> dict:
+        """
+        Requirements 6: Provide comprehensive customer-wise monthly records:
+        - Billing month
+        - Invoice number
+        - Total bill
+        - Amount received
+        - Remaining balance
+        - Payment status
+        - Payment history
+        - Total outstanding balance across all months
+        - Cash collection history
+        - Payment allocation details
+        """
+        all_invoices = Invoice.objects.filter(customer=customer).exclude(status='void').order_by('-created_at')
+        all_payments = Payment.objects.filter(customer=customer).order_by('-received_at')
+
+        monthly_records = []
+        for inv in all_invoices:
+            # Gather payment allocations for this specific invoice
+            allocations = []
+            for alloc in inv.allocations.select_related('payment').order_by('allocated_at'):
+                allocations.append({
+                    'allocation_id': alloc.id,
+                    'payment_id': alloc.payment_id,
+                    'allocated_amount': str(alloc.allocated_amount),
+                    'payment_method': alloc.payment.method,
+                    'allocated_at': alloc.allocated_at.isoformat(),
+                    'notes': alloc.notes,
+                })
+
+            period_label = inv.billing_period or (inv.created_at.strftime('%Y-%m') if inv.created_at else '')
+
+            monthly_records.append({
+                'invoice_id': inv.id,
+                'invoice_number': inv.invoice_number,
+                'billing_type': inv.billing_type,
+                'billing_month': period_label,
+                'total_bill': str(inv.grand_total),
+                'amount_received': str(inv.total_paid),
+                'remaining_balance': str(inv.pending_amount),
+                'status': inv.status.upper(),
+                'created_at': inv.created_at.isoformat() if inv.created_at else None,
+                'allocations': allocations,
+            })
+
+        # Calculate overall net outstanding across all invoices
+        total_invoiced = sum(Decimal(str(r['total_bill'])) for r in monthly_records)
+        total_allocated = sum(Decimal(str(r['amount_received'])) for r in monthly_records)
+        total_outstanding = max(Decimal('0.00'), total_invoiced - total_allocated)
+
+        payment_history = []
+        for p in all_payments:
+            payment_history.append({
+                'payment_id': p.id,
+                'amount': str(p.amount),
+                'method': p.method,
+                'received_at': p.received_at.isoformat(),
+                'total_allocated': str(p.total_allocated),
+                'unallocated_amount': str(p.unallocated_amount),
+                'reference_number': p.reference_number,
+                'notes': p.notes,
+            })
+
+        return {
+            'customer': {
+                'id': customer.id,
+                'name': customer.name,
+                'phone': customer.phone,
+            },
+            'total_outstanding': str(total_outstanding),
+            'monthly_records': monthly_records,
+            'payment_history': payment_history,
+        }
+
 

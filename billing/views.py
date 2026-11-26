@@ -279,6 +279,16 @@ class CustomerViewSet(viewsets.ModelViewSet):
         statement = LedgerService.get_customer_statement(customer=customer, year=year, month=month)
         return Response(statement)
 
+    @action(detail=True, methods=['get'], url_path='monthly-ledger')
+    def monthly_ledger(self, request, pk=None):
+        """
+        Requirements 6: Customer-wise comprehensive monthly records,
+        all past unpaid invoices, cash collection history and allocation details.
+        """
+        customer = self.get_object()
+        overview = LedgerService.get_customer_monthly_ledger_overview(customer=customer)
+        return Response(overview)
+
     @action(detail=True, methods=['get'])
     def orders(self, request, pk=None):
         """List all customer orders"""
@@ -338,8 +348,6 @@ class CustomerViewSet(viewsets.ModelViewSet):
         if amount <= Decimal('0.00'):
             raise ValidationError({'amount': 'Payment amount must be greater than zero.'})
 
-        pending_invoices = customer.invoices.exclude(status='paid').order_by('created_at')
-
         # Create payment linked directly to Customer using centralized service
         pm = PaymentAllocationService.record_payment(
             amount=amount,
@@ -366,6 +374,7 @@ class CustomerViewSet(viewsets.ModelViewSet):
             'amount_allocated': str(allocated_now),
             'unallocated_credit': str(unallocated_advance),
             'invoices_settled': invoices_settled,
+            'settled_invoice_ids': alloc_res.get('settled_invoices', []),
         }, status=status.HTTP_201_CREATED)
 
 
@@ -392,6 +401,8 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         date_param = self.request.query_params.get('date')
         customer_id = self.request.query_params.get('customer')
         company_id = self.request.query_params.get('company')
+        billing_type = self.request.query_params.get('billing_type')
+        billing_period = self.request.query_params.get('billing_period')
         search = self.request.query_params.get('search', '').strip()
 
         if status_param:
@@ -402,6 +413,10 @@ class InvoiceViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(customer_id=customer_id)
         if company_id:
             queryset = queryset.filter(company_id=company_id)
+        if billing_type:
+            queryset = queryset.filter(billing_type=billing_type)
+        if billing_period:
+            queryset = queryset.filter(billing_period=billing_period)
         if search:
             queryset = queryset.filter(
                 Q(invoice_number__icontains=search) |
@@ -560,6 +575,45 @@ class InvoiceViewSet(viewsets.ModelViewSet):
 
         fresh_inv = self.get_queryset().get(id=invoice.id)
         return Response(InvoiceDetailSerializer(fresh_inv).data, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['post'], url_path='generate-monthly')
+    def generate_monthly(self, request):
+        """
+        Generate monthly consolidated invoices for delivered orders within a calendar month.
+        Body: { "year": 2026, "month": 11, "customer_ids": [1, 2] (optional) }
+        """
+        user = request.user
+        if not (user.is_staff or user.is_superuser or (hasattr(user, 'profile') and user.profile.role == 'owner')):
+            raise PermissionDenied("Only the business owner can generate monthly bills.")
+
+        year = request.data.get('year')
+        month = request.data.get('month')
+        customer_ids = request.data.get('customer_ids')
+
+        now = timezone.now()
+        try:
+            year = int(year) if year is not None else now.year
+            month = int(month) if month is not None else now.month
+        except (ValueError, TypeError):
+            raise ValidationError({'detail': 'year and month must be valid integers.'})
+
+        if month < 1 or month > 12:
+            raise ValidationError({'month': 'Month must be between 1 and 12.'})
+
+        from .monthly_service import MonthlyBillingService
+        generated = MonthlyBillingService.generate_monthly_invoices_for_month(
+            year=year,
+            month=month,
+            owner_user=user,
+            customer_ids=customer_ids if isinstance(customer_ids, list) else None,
+        )
+
+        return Response({
+            'success': True,
+            'billing_period': f"{year:04d}-{month:02d}",
+            'invoices_generated_count': len(generated),
+            'invoices': InvoiceDetailSerializer(generated, many=True).data,
+        }, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['post'])
     def payments(self, request, pk=None):
