@@ -25,6 +25,21 @@ class PassthroughPdfRenderer(BaseRenderer):
     def render(self, data, accepted_media_type=None, renderer_context=None):
         return data
 
+
+class PassthroughExcelRenderer(BaseRenderer):
+    """
+    Renders raw binary XLSX data for DRF content negotiation.
+    Matches Accept: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,
+    Accept: */*, or custom binary requests without triggering 406 Not Acceptable.
+    """
+    media_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    format = 'xlsx'
+    charset = None
+    render_style = 'binary'
+
+    def render(self, data, accepted_media_type=None, renderer_context=None):
+        return data
+
 from .models import (
     Company,
     CompanyProductPrice,
@@ -736,7 +751,7 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         breakdown_data = MonthlyBillingService.get_monthly_invoice_breakdown(invoice)
         return Response(breakdown_data, status=status.HTTP_200_OK)
 
-    @action(detail=True, methods=['get'])
+    @action(detail=True, methods=['get'], renderer_classes=[PassthroughExcelRenderer])
     def excel(self, request, pk=None):
         """
         Exports structured Excel (.xlsx) file for a monthly invoice with date-wise sections and daily subtotals.
