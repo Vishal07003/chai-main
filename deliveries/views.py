@@ -2,6 +2,7 @@ from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.pagination import PageNumberPagination
 from django.utils import timezone
 from .models import (
     Delivery,
@@ -20,21 +21,38 @@ from .serializers import (
     DeliveryStatusHistorySerializer,
 )
 
+class OptionalPagination(PageNumberPagination):
+    """
+    PageNumberPagination that only paginates if 'page' query param is provided.
+    If 'page' is omitted, returns the standard unpaginated list for full backwards compatibility.
+    Supports 'page_size' parameter (10, 20, 30, max 100, default 20).
+    """
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+    def paginate_queryset(self, queryset, request, view=None):
+        if 'page' not in request.query_params:
+            return None
+        return super().paginate_queryset(queryset, request, view)
+
 class DeliveryViewSet(viewsets.ModelViewSet):
     """
     Delivery management:
-    - Owners/Staff: view all deliveries, assign/reassign drivers, view tracking history.
-    - Drivers: view ONLY deliveries assigned to them; update delivery status, recorded quantities, and location coordinates.
-    - Lifecycle: assigned -> accepted -> picked_up -> on_the_way -> delivered / failed.
+    - Owners/Staff: view all deliveries, assign/reassign drivers, view history.
+    - Drivers: view ONLY deliveries assigned to them; update delivery status and recorded quantities.
+    - Simplified Lifecycle: pending/assigned -> picked_up -> delivered.
     """
     queryset = Delivery.objects.all()
     serializer_class = DeliverySerializer
     permission_classes = [permissions.IsAuthenticated]
+    pagination_class = OptionalPagination
 
     ALLOWED_STATUS_TRANSITIONS = {
-        'assigned': ['accepted', 'picked_up', 'on_the_way', 'delivered', 'failed'],
-        'accepted': ['picked_up', 'on_the_way', 'delivered', 'failed'],
-        'picked_up': ['on_the_way', 'delivered', 'failed'],
+        'assigned': ['accepted', 'picked_up', 'failed'],
+        'pending': ['accepted', 'picked_up', 'failed'],
+        'accepted': ['picked_up', 'failed'],
+        'picked_up': ['delivered', 'failed'],
         'on_the_way': ['delivered', 'failed'],
         'delivered': [],
         'failed': [],
@@ -106,6 +124,15 @@ class DeliveryViewSet(viewsets.ModelViewSet):
         previous_driver = instance.driver
         updated_delivery = serializer.save(**extra_fields)
 
+        # Synchronize order status if delivery reaches final state
+        if new_status and updated_delivery.order:
+            if new_status == 'delivered' and updated_delivery.order.status != 'delivered':
+                updated_delivery.order.status = 'delivered'
+                updated_delivery.order.save(update_fields=['status', 'updated_at'])
+            elif new_status == 'failed' and updated_delivery.order.status != 'cancelled':
+                updated_delivery.order.status = 'cancelled'
+                updated_delivery.order.save(update_fields=['status', 'updated_at'])
+
         # Audit log state transition
         if new_status and new_status != current_status:
             DeliveryStatusHistory.objects.create(
@@ -122,6 +149,8 @@ class DeliveryViewSet(viewsets.ModelViewSet):
         # Trigger FCM notification when driver is assigned or changed
         if updated_delivery.driver and updated_delivery.driver != previous_driver:
             from notifications.services import NotificationService
+            if previous_driver:
+                NotificationService.on_delivery_reassigned(previous_driver, updated_delivery)
             NotificationService.on_delivery_assigned(updated_delivery)
 
     def perform_destroy(self, instance):
