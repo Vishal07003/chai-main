@@ -142,6 +142,36 @@ class OrderCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Order must include at least one item.")
         return value
 
+    def validate(self, attrs):
+        customer_id = attrs.get('customer_id')
+        company_id = attrs.get('company_id')
+        user = self.context['request'].user if 'request' in self.context else None
+
+        # If user is owner/staff placing an order, require explicit registered customer profile.
+        # Corporate entity selection (company_id) is optional and does not replace customer selection.
+        is_staff_or_owner = user and (user.is_staff or user.is_superuser or (hasattr(user, 'profile') and user.profile.role == 'owner'))
+        if is_staff_or_owner:
+            if not customer_id:
+                raise serializers.ValidationError({
+                    'customer_id': "A registered customer must be selected to create an order."
+                })
+
+        if customer_id:
+            from billing.models import Customer
+            try:
+                Customer.objects.get(id=customer_id)
+            except Customer.DoesNotExist:
+                raise serializers.ValidationError({'customer_id': 'Selected customer does not exist.'})
+
+        if company_id:
+            from billing.models import Company
+            try:
+                Company.objects.get(id=company_id)
+            except Company.DoesNotExist:
+                raise serializers.ValidationError({'company_id': 'Selected company does not exist.'})
+
+        return attrs
+
     def create(self, validated_data):
         items_data = validated_data.pop('items')
         customer_id = validated_data.pop('customer_id', None)
