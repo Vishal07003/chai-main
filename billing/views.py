@@ -304,6 +304,109 @@ class CustomerViewSet(viewsets.ModelViewSet):
         statement = LedgerService.get_customer_statement(customer=customer, year=year, month=month)
         return Response(statement)
 
+    @action(detail=True, methods=['get'], url_path='ledger-pdf', renderer_classes=[PassthroughPdfRenderer])
+    def ledger_pdf(self, request, pk=None):
+        """
+        Exports authenticated Customer Ledger Statement as A4 PDF.
+        Params: ?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD
+        """
+        customer = self.get_object()
+        from .customer_credit_service import CustomerCreditService
+        from .customer_ledger_pdf import generate_customer_ledger_pdf
+
+        start_date_str = request.query_params.get('start_date')
+        end_date_str = request.query_params.get('end_date')
+
+        overview = LedgerService.get_customer_monthly_ledger_overview(customer=customer)
+        balances = CustomerCreditService.get_balances(customer=customer)
+
+        invoices = overview.get('monthly_records', [])
+        payments = overview.get('payment_history', [])
+
+        if start_date_str and end_date_str:
+            invoices = [inv for inv in invoices if inv.get('created_at') and start_date_str <= inv['created_at'][:10] <= end_date_str]
+            payments = [p for p in payments if p.get('received_at') and start_date_str <= p['received_at'][:10] <= end_date_str]
+            period_label = f"{start_date_str} to {end_date_str}"
+        else:
+            period_label = "Complete Ledger History"
+
+        total_invoiced = sum(Decimal(str(inv.get('total_bill', 0))) for inv in invoices)
+        total_collections = sum(Decimal(str(p.get('amount', 0))) for p in payments if not p.get('is_reversed'))
+        outstanding = sum(Decimal(str(inv.get('remaining_balance', 0))) for inv in invoices)
+
+        period_data = {
+            'period_label': period_label,
+            'opening_balance': '0.00',
+            'total_invoiced': str(total_invoiced),
+            'total_collections': str(total_collections),
+            'outstanding_balance': str(outstanding),
+            'available_credit': str(balances['available_credit']),
+            'refund_due': str(balances['refund_due']),
+            'invoices': invoices,
+            'payments': payments,
+        }
+
+        pdf_bytes = generate_customer_ledger_pdf(customer, period_data)
+        filename = f"ChaiFlow_Ledger_{customer.name.replace(' ', '_')}_{customer.id}.pdf"
+
+        response = HttpResponse(pdf_bytes, content_type='application/pdf')
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        response['Content-Length'] = len(pdf_bytes)
+        return response
+
+    @action(detail=True, methods=['get'], url_path='ledger-excel', renderer_classes=[PassthroughExcelRenderer])
+    def ledger_excel(self, request, pk=None):
+        """
+        Exports authenticated Customer Ledger Statement as XLSX Excel file.
+        Params: ?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD
+        """
+        customer = self.get_object()
+        from .customer_credit_service import CustomerCreditService
+        from .customer_ledger_excel import generate_customer_ledger_excel
+
+        start_date_str = request.query_params.get('start_date')
+        end_date_str = request.query_params.get('end_date')
+
+        overview = LedgerService.get_customer_monthly_ledger_overview(customer=customer)
+        balances = CustomerCreditService.get_balances(customer=customer)
+
+        invoices = overview.get('monthly_records', [])
+        payments = overview.get('payment_history', [])
+
+        if start_date_str and end_date_str:
+            invoices = [inv for inv in invoices if inv.get('created_at') and start_date_str <= inv['created_at'][:10] <= end_date_str]
+            payments = [p for p in payments if p.get('received_at') and start_date_str <= p['received_at'][:10] <= end_date_str]
+            period_label = f"{start_date_str} to {end_date_str}"
+        else:
+            period_label = "Complete Ledger History"
+
+        total_invoiced = sum(Decimal(str(inv.get('total_bill', 0))) for inv in invoices)
+        total_collections = sum(Decimal(str(p.get('amount', 0))) for p in payments if not p.get('is_reversed'))
+        outstanding = sum(Decimal(str(inv.get('remaining_balance', 0))) for inv in invoices)
+
+        period_data = {
+            'period_label': period_label,
+            'opening_balance': '0.00',
+            'total_invoiced': str(total_invoiced),
+            'total_collections': str(total_collections),
+            'outstanding_balance': str(outstanding),
+            'available_credit': str(balances['available_credit']),
+            'refund_due': str(balances['refund_due']),
+            'invoices': invoices,
+            'payments': payments,
+        }
+
+        excel_bytes = generate_customer_ledger_excel(customer, period_data)
+        filename = f"ChaiFlow_Ledger_{customer.name.replace(' ', '_')}_{customer.id}.xlsx"
+
+        response = HttpResponse(
+            excel_bytes,
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        response['Content-Length'] = len(excel_bytes)
+        return response
+
     @action(detail=True, methods=['get'], url_path='monthly-ledger')
     def monthly_ledger(self, request, pk=None):
         """
