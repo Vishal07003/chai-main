@@ -393,6 +393,65 @@ class NotificationService:
             transaction.on_commit(dispatch)
 
     @classmethod
+    def on_delivery_reassigned(cls, previous_driver, delivery):
+        """Notify previous delivery partner that order was reassigned/unassigned"""
+        if not previous_driver:
+            return
+
+        delivery_id = delivery.id
+        order = delivery.order
+        order_num = f"ORD-{order.id:04d}"
+        dedup_key = f"delivery_unassigned_{delivery_id}_{previous_driver.id}"
+
+        def dispatch():
+            if cls._is_duplicate_event(dedup_key):
+                return
+
+            cls.send_to_user(
+                user=previous_driver,
+                title="Delivery Reassigned ℹ️",
+                body=f"Order {order_num} has been reassigned to another delivery partner.",
+                data={
+                    'type': 'delivery_reassigned',
+                    'delivery_id': delivery_id,
+                    'order_id': order.id,
+                    'order_number': order_num,
+                    'screen': 'Orders',
+                    'dedup_key': dedup_key,
+                }
+            )
+
+        transaction.on_commit(dispatch)
+
+    @classmethod
+    def on_order_cancelled_for_partner(cls, driver_user, order):
+        """Notify assigned delivery partner that an order was cancelled by Owner"""
+        if not driver_user:
+            return
+
+        order_num = f"ORD-{order.id:04d}"
+        dedup_key = f"delivery_cancelled_{order.id}_{driver_user.id}"
+
+        def dispatch():
+            if cls._is_duplicate_event(dedup_key):
+                return
+
+            cls.send_to_user(
+                user=driver_user,
+                title="Order Cancelled 🚫",
+                body=f"Order {order_num} has been cancelled by the store.",
+                data={
+                    'type': 'delivery_cancelled',
+                    'order_id': order.id,
+                    'order_number': order_num,
+                    'screen': 'Orders',
+                    'dedup_key': dedup_key,
+                }
+            )
+
+        transaction.on_commit(dispatch)
+
+    @classmethod
     def on_delivery_assigned(cls, delivery):
         """3. Delivery assigned -> Notify Delivery Partner (FCM & SMS alert)"""
         if not delivery.driver:
@@ -483,6 +542,81 @@ class NotificationService:
                     'partner_name': partner_name,
                     'status': 'delivered',
                     'screen': 'Orders',
+                    'dedup_key': dedup_key,
+                }
+            )
+
+        transaction.on_commit(dispatch)
+
+    # -------------------------------------------------------------
+    # 5. Owner-Only Financial & Billing Domain Event Handlers
+    # Strictly for Owners - Under NO circumstance dispatched to Delivery Partners
+    # -------------------------------------------------------------
+    @classmethod
+    def on_payment_received(cls, payment, customer_name: str = None, invoice_no: str = None):
+        """Owner notification: Payment received from customer"""
+        payment_id = payment.id
+        dedup_key = f"payment_received_{payment_id}"
+
+        def dispatch():
+            if cls._is_duplicate_event(dedup_key):
+                return
+
+            c_name = (
+                customer_name or
+                (getattr(payment.customer, 'name', None) if hasattr(payment, 'customer') and payment.customer else None) or
+                (getattr(payment.company, 'name', None) if hasattr(payment, 'company') and payment.company else None) or
+                'Customer'
+            )
+            amount_str = f"₹{payment.amount}"
+            method_str = getattr(payment, 'method', 'Cash').capitalize()
+
+            body = f"Received {amount_str} from {c_name} via {method_str}."
+            if invoice_no:
+                body += f" (Invoice: #{invoice_no})"
+
+            cls.send_to_role(
+                role='owner',
+                title="Payment Received 💰",
+                body=body,
+                data={
+                    'type': 'payment_received',
+                    'payment_id': payment_id,
+                    'amount': str(payment.amount),
+                    'customer_name': c_name,
+                    'method': method_str,
+                    'screen': 'Invoices',
+                    'dedup_key': dedup_key,
+                }
+            )
+
+        transaction.on_commit(dispatch)
+
+    @classmethod
+    def on_invoice_generated(cls, invoice):
+        """Owner notification: Official invoice generated"""
+        invoice_id = invoice.id
+        dedup_key = f"invoice_generated_{invoice_id}"
+
+        def dispatch():
+            if cls._is_duplicate_event(dedup_key):
+                return
+
+            c_name = invoice.customer_name or 'Walk-in Customer'
+            inv_no = invoice.invoice_number or f"INV-{invoice.id}"
+            grand_total_str = f"₹{invoice.grand_total}"
+
+            cls.send_to_role(
+                role='owner',
+                title="Invoice Generated 📄",
+                body=f"Invoice {inv_no} generated for {c_name} ({grand_total_str}).",
+                data={
+                    'type': 'invoice_generated',
+                    'invoice_id': invoice_id,
+                    'invoice_number': inv_no,
+                    'customer_name': c_name,
+                    'grand_total': str(invoice.grand_total),
+                    'screen': 'InvoiceDetail',
                     'dedup_key': dedup_key,
                 }
             )
