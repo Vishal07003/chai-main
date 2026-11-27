@@ -39,6 +39,27 @@ class ProductViewSet(viewsets.ModelViewSet):
         return queryset
 
 
+    def perform_destroy(self, instance):
+        """
+        Safe deletion/deactivation:
+        Inspect order and invoice relationships.
+        If the product has ever been referenced in historical OrderItem or InvoiceItem records,
+        do NOT hard delete it. Soft-deactivate (is_available = False) to safeguard historical integrity.
+        Hard delete is only performed if never used in any transaction.
+        """
+        from orders.models import OrderItem
+        from billing.models import InvoiceItem
+
+        has_orders = OrderItem.objects.filter(product=instance).exists()
+        has_invoices = InvoiceItem.objects.filter(product=instance).exists()
+
+        if has_orders or has_invoices:
+            instance.is_available = False
+            instance.save(update_fields=['is_available'])
+        else:
+            instance.delete()
+
+
 class ProductImageUploadView(APIView):
     """
     Uploads a product image file to backend media storage and returns the authoritative URL.
