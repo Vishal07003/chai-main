@@ -258,3 +258,63 @@ class PaymentAllocationService:
                 'invoice_status': invoice.status,
                 'invoice_pending': str(invoice.pending_amount),
             }
+
+    @classmethod
+    def reverse_payment(
+        cls,
+        payment_id: int,
+        reason: str,
+        reversed_by=None
+    ) -> Payment:
+        """
+        Safely, atomically, and immutably reverses a payment:
+        - Never deletes the original payment or allocation records.
+        - Marks payment and its allocations as is_reversed=True with timestamp, reason, and author.
+        - Recalculates and updates payment statuses of all affected invoices.
+        - Excludes reversed payment from customer/company collection totals and ledger credits.
+        - Uses row-level lock (select_for_update) to protect against concurrent duplicate reversals.
+        """
+        clean_reason = (reason or '').strip()
+        if not clean_reason:
+            raise ValidationError({'reason': "A mandatory reversal reason must be provided."})
+
+        with transaction.atomic():
+            try:
+                payment = Payment.objects.select_for_update().get(id=payment_id)
+            except Payment.DoesNotExist:
+                raise ValidationError({'payment_id': "Payment not found."})
+
+            if payment.is_reversed:
+                raise ValidationError({'payment': f"Payment #{payment.id} has already been reversed on {payment.reversed_at} and cannot be reversed again."})
+
+            now = timezone.now()
+
+            # 1. Gather all affected invoices and lock them
+            affected_allocations = payment.allocations.select_for_update().filter(is_reversed=False)
+            affected_invoice_ids = set(affected_allocations.values_list('invoice_id', flat=True))
+
+            if payment.invoice_id:
+                affected_invoice_ids.add(payment.invoice_id)
+
+            locked_invoices = list(Invoice.objects.select_for_update().filter(id__in=affected_invoice_ids))
+
+            # 2. Mark allocations as reversed
+            affected_allocations.update(
+                is_reversed=True,
+                reversed_at=now,
+                notes=models.functions.Concat('notes', models.Value(f" [REVERSED: {clean_reason}]"))
+            )
+
+            # 3. Mark the payment itself as reversed
+            payment.is_reversed = True
+            payment.reversal_reason = clean_reason
+            payment.reversed_at = now
+            payment.reversed_by = reversed_by
+            payment.notes = f"{payment.notes}\n[REVERSED on {now.strftime('%Y-%m-%d %H:%M')}: {clean_reason}]".strip()
+            payment.save(update_fields=['is_reversed', 'reversal_reason', 'reversed_at', 'reversed_by', 'notes'])
+
+            # 4. Recalculate status and pending balance for each affected invoice
+            for inv in locked_invoices:
+                inv.update_payment_status()
+
+            return payment

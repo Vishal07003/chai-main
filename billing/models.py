@@ -155,9 +155,9 @@ class Invoice(models.Model):
 
     @property
     def total_paid(self):
-        # Uses explicit PaymentAllocation links, plus any unallocated legacy direct payments on this invoice
-        from_allocations = self.allocations.aggregate(total=models.Sum('allocated_amount'))['total'] or Decimal('0.00')
-        from_unallocated_direct = self.payments.filter(allocations__isnull=True).aggregate(total=models.Sum('amount'))['total'] or Decimal('0.00')
+        # Uses explicit non-reversed PaymentAllocation links, plus any unallocated non-reversed legacy direct payments on this invoice
+        from_allocations = self.allocations.filter(is_reversed=False).aggregate(total=models.Sum('allocated_amount'))['total'] or Decimal('0.00')
+        from_unallocated_direct = self.payments.filter(allocations__isnull=True, is_reversed=False).aggregate(total=models.Sum('amount'))['total'] or Decimal('0.00')
         return from_allocations + from_unallocated_direct
 
     @property
@@ -230,21 +230,30 @@ class Payment(models.Model):
     reference_number = models.CharField(max_length=100, blank=True, default='')
     notes = models.TextField(blank=True, default='')
     recorded_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='recorded_payments')
+    is_reversed = models.BooleanField(default=False, db_index=True, help_text="True if payment has been safely reversed.")
+    reversal_reason = models.TextField(blank=True, default='', help_text="Mandatory explanation for reversing this payment.")
+    reversed_at = models.DateTimeField(null=True, blank=True, help_text="Timestamp when payment was reversed.")
+    reversed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='reversed_payments', help_text="User who authorized reversal.")
 
     class Meta:
         ordering = ['-received_at']
 
     def __str__(self):
+        status_str = " [REVERSED]" if self.is_reversed else ""
         ref = f"for {self.invoice.invoice_number}" if self.invoice else f"for {self.company.name if self.company else 'Account'}"
-        return f"Payment of ₹{self.amount} ({self.method}) {ref}"
+        return f"Payment of ₹{self.amount} ({self.method}) {ref}{status_str}"
 
     @property
     def total_allocated(self):
-        alloc = self.allocations.aggregate(s=models.Sum('allocated_amount'))['s']
+        if self.is_reversed:
+            return Decimal('0.00')
+        alloc = self.allocations.filter(is_reversed=False).aggregate(s=models.Sum('allocated_amount'))['s']
         return alloc or Decimal('0.00')
 
     @property
     def unallocated_amount(self):
+        if self.is_reversed:
+            return Decimal('0.00')
         return max(Decimal('0.00'), self.amount - self.total_allocated)
 
 
@@ -260,6 +269,8 @@ class PaymentAllocation(models.Model):
     allocated_amount = models.DecimalField(max_digits=10, decimal_places=2)
     allocated_at = models.DateTimeField(auto_now_add=True)
     notes = models.TextField(blank=True, default='')
+    is_reversed = models.BooleanField(default=False, db_index=True, help_text="True if this allocation was reversed.")
+    reversed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ['-allocated_at']

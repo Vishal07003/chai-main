@@ -140,6 +140,13 @@ class CompanyViewSet(viewsets.ModelViewSet):
         # 2. Run FIFO allocation across unpaid company invoices
         alloc_res = PaymentAllocationService.allocate_payment_fifo(payment=payment, company=company)
 
+        # Notify Owner of payment received
+        try:
+            from notifications.services import NotificationService
+            NotificationService.on_payment_received(payment, customer_name=company.name)
+        except Exception as e:
+            logger.warning(f"Failed to dispatch payment received notification: {e}")
+
         return Response({
             'success': True,
             'payment_id': payment.id,
@@ -367,6 +374,13 @@ class CustomerViewSet(viewsets.ModelViewSet):
 
         unallocated_advance = max(Decimal('0.00'), amount - allocated_now)
 
+        # Notify Owner of payment received
+        try:
+            from notifications.services import NotificationService
+            NotificationService.on_payment_received(pm, customer_name=customer.name)
+        except Exception as e:
+            logger.warning(f"Failed to dispatch customer payment received notification: {e}")
+
         return Response({
             'success': True,
             'customer_id': customer.id,
@@ -431,6 +445,14 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         invoice = serializer.save()
+
+        # Notify Owner of invoice generation
+        try:
+            from notifications.services import NotificationService
+            NotificationService.on_invoice_generated(invoice)
+        except Exception as e:
+            logger.warning(f"Failed to dispatch invoice generated notification: {e}")
+
         return Response(InvoiceDetailSerializer(invoice).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['patch', 'put'])
@@ -450,6 +472,11 @@ class InvoiceViewSet(viewsets.ModelViewSet):
 
         invoice = self.get_object()
         data = request.data
+
+        # Enforce mandatory correction reason
+        reason = data.get('reason')
+        if not reason or not str(reason).strip():
+            raise ValidationError({'reason': 'A mandatory correction reason must be provided.'})
 
         with transaction.atomic():
             locked_invoice = Invoice.objects.select_for_update().get(id=invoice.id)
@@ -570,7 +597,7 @@ class InvoiceViewSet(viewsets.ModelViewSet):
                     'notes': locked_invoice.notes,
                     'items': updated_items_snap,
                 },
-                reason=data.get('reason', 'Bill edited by Owner'),
+                reason=str(reason).strip(),
             )
 
         fresh_inv = self.get_queryset().get(id=invoice.id)
@@ -658,6 +685,17 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         # Fetch fresh invoice instance without stale prefetch caches
         fresh_invoice = self.get_queryset().get(id=invoice.id)
 
+        # Notify Owner of payment received for invoice
+        try:
+            from notifications.services import NotificationService
+            NotificationService.on_payment_received(
+                payment,
+                customer_name=invoice.customer_name,
+                invoice_no=invoice.invoice_number
+            )
+        except Exception as e:
+            logger.warning(f"Failed to dispatch invoice payment received notification: {e}")
+
         return Response(InvoiceDetailSerializer(fresh_invoice).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['get'], renderer_classes=[PassthroughPdfRenderer])
@@ -708,7 +746,7 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         total_sales = invoices_today.aggregate(s=Sum('grand_total'))['s'] or Decimal('0.00')
         invoices_count = invoices_today.count()
 
-        payments_today = Payment.objects.filter(received_at__date=date_param)
+        payments_today = Payment.objects.filter(received_at__date=date_param, is_reversed=False)
         cash_received = payments_today.filter(method='cash').aggregate(s=Sum('amount'))['s'] or Decimal('0.00')
         online_received = payments_today.exclude(method='cash').aggregate(s=Sum('amount'))['s'] or Decimal('0.00')
         total_received = cash_received + online_received
@@ -886,6 +924,13 @@ class DraftInvoiceViewSet(viewsets.ModelViewSet):
             notes=notes,
         )
 
+        # Notify Owner of finalized invoice
+        try:
+            from notifications.services import NotificationService
+            NotificationService.on_invoice_generated(official_invoice)
+        except Exception as e:
+            logger.warning(f"Failed to dispatch finalized invoice notification: {e}")
+
         return Response({
             'success': True,
             'message': f"Draft #{draft.draft_number} successfully finalized into official Invoice #{official_invoice.invoice_number}.",
@@ -960,6 +1005,39 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
             queryset = queryset.filter(received_at__date=date_param)
 
         return queryset
+
+    @action(detail=True, methods=['post'])
+    def reverse(self, request, pk=None):
+        """
+        POST /api/v1/billing/payments/{id}/reverse/
+        Safely and atomically reverses a payment:
+        - Requires a mandatory 'reason'
+        - Undoes invoice allocations and restores invoice balance
+        - Recalculates customer outstanding balance
+        - Excludes reversed payment from future collection totals
+        - Preserves immutable audit history
+        """
+        payment = self.get_object()
+        reason = request.data.get('reason')
+        if not reason or not str(reason).strip():
+            return Response(
+                {'reason': "A mandatory reversal reason must be provided."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            reversed_payment = PaymentAllocationService.reverse_payment(
+                payment_id=payment.id,
+                reason=str(reason).strip(),
+                reversed_by=request.user
+            )
+        except ValidationError as e:
+            return Response(e.detail, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            PaymentSerializer(reversed_payment).data,
+            status=status.HTTP_200_OK
+        )
 
     @action(detail=True, methods=['get'], renderer_classes=[PassthroughPdfRenderer])
     def receipt(self, request, pk=None):
