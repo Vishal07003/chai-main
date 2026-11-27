@@ -37,9 +37,9 @@ class OrderViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
 
     ALLOWED_TRANSITIONS = {
-        'pending': ['accepted', 'preparing', 'out_for_delivery', 'delivered', 'cancelled'],
-        'accepted': ['preparing', 'out_for_delivery', 'delivered', 'cancelled'],
-        'preparing': ['out_for_delivery', 'delivered', 'cancelled'],
+        'pending': ['accepted', 'cancelled'],
+        'accepted': ['preparing', 'cancelled'],
+        'preparing': ['out_for_delivery', 'cancelled'],
         'out_for_delivery': ['delivered', 'cancelled'],
         'delivered': [],
         'cancelled': [],
