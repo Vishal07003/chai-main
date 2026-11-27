@@ -6,7 +6,7 @@ from .models import (
     Company, CompanyProductPrice, Customer, CustomerProductPrice,
     Invoice, InvoiceItem, Payment, PaymentAllocation, LedgerAdjustment,
     InvoiceOrder, DraftInvoice, DraftInvoiceItem, DraftInvoiceOrder,
-    Expense, InvoiceAuditLog
+    Expense, InvoiceAuditLog, CustomerCreditTransaction
 )
 from products.models import Product
 
