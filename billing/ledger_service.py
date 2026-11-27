@@ -46,7 +46,8 @@ class LedgerService:
         # Prior payments linked directly or via company
         prior_payments = Payment.objects.filter(
             models.Q(company=company) | models.Q(invoice__company=company),
-            received_at__lt=start_dt
+            received_at__lt=start_dt,
+            is_reversed=False,
         ).distinct().aggregate(s=models.Sum('amount'))['s'] or Decimal('0.00')
 
         prior_credit_adjustments = LedgerAdjustment.objects.filter(
@@ -196,7 +197,8 @@ class LedgerService:
 
         prior_payments = Payment.objects.filter(
             models.Q(customer=customer) | models.Q(invoice__customer=customer),
-            received_at__lt=start_dt
+            received_at__lt=start_dt,
+            is_reversed=False,
         ).distinct().aggregate(s=models.Sum('amount'))['s'] or Decimal('0.00')
 
         opening_balance = prior_invoiced - prior_payments
@@ -232,10 +234,12 @@ class LedgerService:
                 'timestamp': pm.received_at,
                 'type': 'PAYMENT',
                 'reference_no': f"PAY-{pm.id:06d}",
-                'description': f"Payment via {pm.get_method_display()}" + (f" (Ref: {pm.reference_number})" if pm.reference_number else ""),
+                'description': f"Payment via {pm.get_method_display()}" + (f" (Ref: {pm.reference_number})" if pm.reference_number else "") + (" [REVERSED]" if pm.is_reversed else ""),
                 'debit': Decimal('0.00'),
-                'credit': pm.amount,
+                'credit': Decimal('0.00') if pm.is_reversed else pm.amount,
                 'entity_id': pm.id,
+                'is_reversed': pm.is_reversed,
+                'reversal_reason': pm.reversal_reason,
             })
 
         # --- 3. Sort Chronologically & Compute Running Balance ---
@@ -351,6 +355,9 @@ class LedgerService:
                 'unallocated_amount': str(p.unallocated_amount),
                 'reference_number': p.reference_number,
                 'notes': p.notes,
+                'is_reversed': p.is_reversed,
+                'reversal_reason': p.reversal_reason,
+                'reversed_at': p.reversed_at.isoformat() if p.reversed_at else None,
             })
 
         return {
@@ -428,6 +435,9 @@ class LedgerService:
                 'unallocated_amount': str(p.unallocated_amount),
                 'reference_number': p.reference_number,
                 'notes': p.notes,
+                'is_reversed': p.is_reversed,
+                'reversal_reason': p.reversal_reason,
+                'reversed_at': p.reversed_at.isoformat() if p.reversed_at else None,
             })
 
         return {
