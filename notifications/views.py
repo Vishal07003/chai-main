@@ -53,9 +53,12 @@ class NotificationLogViewSet(viewsets.ModelViewSet):
                 Q(recipient=user) | Q(target_role__in=['owner', 'all'])
             )
         elif role == 'delivery':
-            # Delivery Partner sees deliveries assigned & alerts sent to them or role 'delivery'
+            # Delivery Partner sees deliveries assigned & delivery alerts sent strictly to them as recipient.
+            # Under NO circumstance should delivery partner receive financial, invoice, or owner-targeted notifications,
+            # or notifications meant for other delivery partners.
             return NotificationLog.objects.filter(
-                Q(recipient=user) | Q(target_role__in=['delivery', 'all'])
+                recipient=user,
+                target_role='delivery'
             )
         else:
             return NotificationLog.objects.filter(recipient=user)
@@ -76,6 +79,17 @@ class NotificationLogViewSet(viewsets.ModelViewSet):
         qs = self.get_queryset().filter(is_read=False)
         updated = qs.update(is_read=True)
         return Response({'success': True, 'updated_count': updated})
+
+    @action(detail=False, methods=['delete', 'post'], url_path='clear-all')
+    def clear_all(self, request):
+        """
+        Clear / delete all notifications belonging strictly to the authenticated user's scoped queryset.
+        Never affects other users' or Owner's historical notifications.
+        """
+        qs = self.get_queryset()
+        count = qs.count()
+        qs.delete()
+        return Response({'success': True, 'cleared_count': count})
 
     @action(detail=False, methods=['post'])
     def retry_failed(self, request):
