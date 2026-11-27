@@ -1,3 +1,4 @@
+import logging
 from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -8,6 +9,8 @@ from django.db.models import Q, Sum, Count
 from django.utils import timezone
 from decimal import Decimal
 from django.http import HttpResponse
+
+logger = logging.getLogger(__name__)
 
 class PassthroughPdfRenderer(BaseRenderer):
     """
@@ -599,6 +602,19 @@ class InvoiceViewSet(viewsets.ModelViewSet):
                 },
                 reason=str(reason).strip(),
             )
+
+            # 7. Phase 5: Handle excess payment treatment if corrected total is less than already received payments
+            excess_treatment = data.get('excess_treatment')  # 'credit' or 'refund'
+            excess_amount = max(Decimal('0.00'), locked_invoice.total_paid - new_grand_total)
+            if excess_amount > Decimal('0.00') and excess_treatment:
+                from .customer_credit_service import CustomerCreditService
+                CustomerCreditService.record_excess_treatment(
+                    invoice=locked_invoice,
+                    treatment=excess_treatment,
+                    amount=excess_amount,
+                    recorded_by=user,
+                    reason=f"Correction excess treatment: {excess_treatment.upper()} ({reason})"
+                )
 
         fresh_inv = self.get_queryset().get(id=invoice.id)
         return Response(InvoiceDetailSerializer(fresh_inv).data, status=status.HTTP_200_OK)

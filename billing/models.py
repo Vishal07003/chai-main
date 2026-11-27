@@ -553,3 +553,39 @@ class InvoiceAuditLog(models.Model):
         return f"Audit for Invoice #{self.invoice_id} at {self.created_at} by {self.edited_by.username} (₹{self.previous_total} -> ₹{self.updated_total})"
 
 
+class CustomerCreditTransaction(models.Model):
+    """
+    Phase 5: Immutable Customer Credit Balance & Refund Due Ledger.
+    Handles excess payments resulting from invoice corrections or customer advances.
+    Types:
+      - 'CREDIT_ADDED': Excess payment allocated as Customer Credit Balance
+      - 'CREDIT_APPLIED': Credit balance used to settle an invoice
+      - 'REFUND_DUE': Excess payment designated as Refund Due to Customer
+      - 'REFUND_SETTLED': Refund paid out manually outside app by Owner
+    Strictly preserves immutable financial audit history.
+    """
+    TRANSACTION_TYPE_CHOICES = (
+        ('CREDIT_ADDED', 'Credit Added'),
+        ('CREDIT_APPLIED', 'Credit Applied'),
+        ('REFUND_DUE', 'Refund Due'),
+        ('REFUND_SETTLED', 'Refund Settled (Manual)'),
+    )
+
+    customer = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name='credit_transactions', null=True, blank=True)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='credit_transactions', null=True, blank=True)
+    invoice = models.ForeignKey(Invoice, on_delete=models.SET_NULL, null=True, blank=True, related_name='credit_transactions')
+    transaction_type = models.CharField(max_length=20, choices=TRANSACTION_TYPE_CHOICES, db_index=True)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    reason = models.TextField(blank=True, default='')
+    recorded_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name='recorded_credit_txs')
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        target = self.customer.name if self.customer else (self.company.name if self.company else 'N/A')
+        return f"[{self.get_transaction_type_display()}] ₹{self.amount} for {target} on {self.created_at}"
+
+
+

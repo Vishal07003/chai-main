@@ -47,7 +47,8 @@ class CompanySerializer(serializers.ModelSerializer):
 
     def get_total_paid(self, obj):
         res = Payment.objects.filter(
-            models.Q(company=obj) | models.Q(invoice__company=obj)
+            models.Q(company=obj) | models.Q(invoice__company=obj),
+            is_reversed=False
         ).distinct().aggregate(s=models.Sum('amount'))['s']
         return str(res or Decimal('0.00'))
 
@@ -133,7 +134,10 @@ class CustomerSerializer(serializers.ModelSerializer):
         return str(res or Decimal('0.00'))
 
     def get_total_paid_amount(self, obj):
-        res = Payment.objects.filter(models.Q(customer=obj) | models.Q(invoice__customer=obj)).distinct().aggregate(total=models.Sum('amount'))['total']
+        res = Payment.objects.filter(
+            models.Q(customer=obj) | models.Q(invoice__customer=obj),
+            is_reversed=False
+        ).distinct().aggregate(total=models.Sum('amount'))['total']
         return str(res or Decimal('0.00'))
 
     def get_total_pending_amount(self, obj):
@@ -159,21 +163,32 @@ class PaymentAllocationSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = PaymentAllocation
-        fields = ['id', 'payment', 'invoice', 'invoice_number', 'allocated_amount', 'allocated_at', 'notes']
-        read_only_fields = ['id', 'allocated_at']
+        fields = [
+            'id', 'payment', 'invoice', 'invoice_number', 'allocated_amount',
+            'allocated_at', 'notes', 'is_reversed', 'reversed_at'
+        ]
+        read_only_fields = ['id', 'allocated_at', 'is_reversed', 'reversed_at']
 
 
 class PaymentSerializer(serializers.ModelSerializer):
     allocations = PaymentAllocationSerializer(many=True, read_only=True)
     unallocated_amount = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
+    customer_name = serializers.CharField(source='customer.name', read_only=True)
+    invoice_number = serializers.CharField(source='invoice.invoice_number', read_only=True)
+    reversed_by_username = serializers.CharField(source='reversed_by.username', read_only=True)
 
     class Meta:
         model = Payment
         fields = [
-            'id', 'company', 'invoice', 'amount', 'method', 'reference_number',
-            'received_at', 'notes', 'allocations', 'unallocated_amount'
+            'id', 'customer', 'customer_name', 'company', 'invoice', 'invoice_number',
+            'amount', 'method', 'reference_number',
+            'received_at', 'notes', 'allocations', 'unallocated_amount',
+            'is_reversed', 'reversal_reason', 'reversed_at', 'reversed_by', 'reversed_by_username'
         ]
-        read_only_fields = ['id', 'received_at', 'allocations', 'unallocated_amount']
+        read_only_fields = [
+            'id', 'received_at', 'allocations', 'unallocated_amount',
+            'is_reversed', 'reversal_reason', 'reversed_at', 'reversed_by', 'reversed_by_username'
+        ]
 
     def validate_amount(self, value):
         if value <= Decimal('0.00'):
@@ -279,6 +294,30 @@ class InvoiceCreateSerializer(serializers.Serializer):
         if value is not None and value < Decimal('0.00'):
             raise serializers.ValidationError("Discount amount cannot be negative.")
         return value or Decimal('0.00')
+
+    def validate(self, attrs):
+        company_id = attrs.get('company_id')
+        customer_id = attrs.get('customer_id')
+
+        # Strict Requirement: Every new invoice MUST have a valid registered customer_id.
+        # company_id is optional metadata and does NOT bypass the customer_id requirement.
+        if not customer_id:
+            raise serializers.ValidationError({
+                'customer_id': "A registered customer must be selected. Walk-in billing without a customer is disabled."
+            })
+
+        try:
+            Customer.objects.get(id=customer_id)
+        except Customer.DoesNotExist:
+            raise serializers.ValidationError({'customer_id': 'Selected customer does not exist.'})
+
+        if company_id:
+            try:
+                Company.objects.get(id=company_id)
+            except Company.DoesNotExist:
+                raise serializers.ValidationError({'company_id': 'Selected company does not exist.'})
+
+        return attrs
 
     def create(self, validated_data):
         company_id = validated_data.get('company_id')
@@ -523,7 +562,7 @@ class DraftInvoiceCreateSerializer(serializers.Serializer):
         # Phase 5C.1 Validation: Quick billing drafts with assigned delivery partner require a valid destination address
         if billing_source == 'quick_billing' and delivery_partner_id is not None:
             if not customer_id:
-                # Walk-in customer
+                # Walk-in customer (legacy check)
                 if not delivery_address:
                     raise serializers.ValidationError({
                         'delivery_address': "Delivery address is required when assigning a delivery partner to a walk-in customer."
@@ -537,6 +576,19 @@ class DraftInvoiceCreateSerializer(serializers.Serializer):
                     raise serializers.ValidationError({
                         'delivery_address': "Delivery address is required for delivery orders. Customer has no saved address, please provide an address."
                     })
+
+        # Require registered customer for new drafts
+        if not customer_id and not order_ids:
+            raise serializers.ValidationError({
+                'customer_id': "A registered customer is required. Walk-in drafts are disabled."
+            })
+
+        if customer_id:
+            from billing.models import Customer
+            try:
+                Customer.objects.get(id=customer_id)
+            except Customer.DoesNotExist:
+                raise serializers.ValidationError({'customer_id': 'Selected customer does not exist.'})
 
         return attrs
 
